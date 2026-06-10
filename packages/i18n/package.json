@@ -1,0 +1,29 @@
+{
+  "name": "@listam/i18n",
+  "version": "0.9.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    }
+  },
+  "files": [
+    "index.mjs",
+    "index.d.ts",
+    "catalogs/*.mjs",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/romme86/listam-packages.git",
+    "directory": "packages/i18n"
+  },
+  "homepage": "https://github.com/romme86/listam-packages/tree/main/packages/i18n",
+  "license": "MIT"
+}

@@ -1,0 +1,22 @@
+{
+  "name": "listam-packages",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared versioned packages for the Listam multi-app architecture (mobile, desktop, headless).",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test packages/*/*.test.mjs",
+    "publish:all": "node scripts/publish-all.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/romme86/listam-packages.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "hyperdht": "^6.27.0"
+  }
+}

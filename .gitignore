@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+*.log
+# Never commit registry auth — used only for publishing.
+.npmrc
+package-lock.json

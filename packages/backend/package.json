@@ -1,0 +1,51 @@
+{
+  "name": "@listam/backend",
+  "version": "0.8.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./backend": "./backend.mjs",
+    "./lib/*.mjs": "./lib/*.mjs",
+    "./platform/bare-kit": "./platform/bare-kit.mjs",
+    "./platform/node": "./platform/node.mjs",
+    "./platform/pear": "./platform/pear.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "backend.mjs",
+    "lib",
+    "platform",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@listam/domain": "^0.7.0",
+    "@listam/logging": "^0.7.0",
+    "@listam/protocol": "^0.7.0",
+    "@listam/secrets": "^0.7.0",
+    "autobase": "^7.20.0",
+    "b4a": "^1.7.1",
+    "bare-fs": "^4.4.4",
+    "bare-path": "^3.0.1",
+    "bare-rpc": "^0.2.12",
+    "bare-url": "^2.4.3",
+    "blind-pairing": "^2.3.1",
+    "corestore": "^7.5.0",
+    "hypercore-crypto": "^3.6.1",
+    "hyperswarm": "^4.12.1",
+    "sodium-universal": "^5.0.1",
+    "z32": "^1.1.0",
+    "@listam/owner-control": "^0.14.0",
+    "hyperdht": "^6.27.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/romme86/listam-packages.git",
+    "directory": "packages/backend"
+  },
+  "homepage": "https://github.com/romme86/listam-packages/tree/main/packages/backend",
+  "license": "MIT"
+}

@@ -1,0 +1,42 @@
+{
+  "name": "@listam/grocery",
+  "version": "0.7.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    },
+    "./category-translations": {
+      "types": "./index.d.ts",
+      "default": "./category-translations.mjs"
+    },
+    "./item-translations": {
+      "types": "./index.d.ts",
+      "default": "./item-translations.mjs"
+    }
+  },
+  "files": [
+    "category-constants.mjs",
+    "category-grouping.mjs",
+    "category-lookup.mjs",
+    "category-translations.mjs",
+    "grocery-text.mjs",
+    "index.mjs",
+    "item-translations.mjs",
+    "index.d.ts",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/romme86/listam-packages.git",
+    "directory": "packages/grocery"
+  },
+  "homepage": "https://github.com/romme86/listam-packages/tree/main/packages/grocery",
+  "license": "MIT"
+}

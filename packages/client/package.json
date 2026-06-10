@@ -1,0 +1,32 @@
+{
+  "name": "@listam/client",
+  "version": "0.8.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    }
+  },
+  "files": [
+    "index.d.ts",
+    "index.mjs",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@listam/protocol": "^0.7.0",
+    "b4a": "^1.7.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/romme86/listam-packages.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/romme86/listam-packages/tree/main/packages/client",
+  "license": "MIT"
+}

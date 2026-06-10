@@ -1,0 +1,33 @@
+{
+  "name": "@listam/owner-control",
+  "version": "0.14.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    }
+  },
+  "files": [
+    "index.mjs",
+    "index.d.ts",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "b4a": "^1.7.1",
+    "hypercore-crypto": "^3.6.1",
+    "z32": "^1.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/romme86/listam-packages.git",
+    "directory": "packages/owner-control"
+  },
+  "homepage": "https://github.com/romme86/listam-packages/tree/main/packages/owner-control",
+  "license": "MIT"
+}

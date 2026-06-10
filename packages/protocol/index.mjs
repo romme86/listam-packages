@@ -1,0 +1,25 @@
+export const RPC_RESET = 0
+export const RPC_MESSAGE = 1
+export const RPC_ADD = 2
+export const RPC_UPDATE = 3
+export const RPC_DELETE = 4
+export const RPC_GET_KEY = 5
+export const SYNC_LIST = 6
+export const RPC_JOIN_KEY = 7
+export const RPC_ADD_FROM_BACKEND = 8
+export const RPC_UPDATE_FROM_BACKEND = 9
+export const RPC_DELETE_FROM_BACKEND = 10
+export const RPC_REQUEST_SYNC = 11
+export const RPC_CREATE_INVITE = 12
+export const RPC_PERSIST_SECRET = 13
+export const RPC_REMOVE_MEMBER = 14
+export const RPC_GET_MEMBERS = 15
+export const RPC_GET_OWNER_RECOVERY_CODE = 16
+export const RPC_RECOVER_OWNER = 17
+export const RPC_RECOVER_STORAGE = 18
+// Owner-control client (Phase 14/15): the frontend drives the worklet's
+// hyperdht owner-control client to pair with and command the user's headless
+// devices. Replies come back over RPC_MESSAGE as { type: 'owner-control-*' }.
+export const RPC_CONTROL_PAIR = 19
+export const RPC_CONTROL_COMMAND = 20
+export const RPC_CONTROL_LIST = 21
