@@ -31,6 +31,7 @@ import { RPC_MESSAGE, RPC_GET_KEY, SYNC_LIST } from "@listam/protocol"
 import Corestore from "corestore"
 import Autobase from "autobase"
 import b4a from "b4a"
+import hypercoreCrypto from "hypercore-crypto"
 import {
     autobase,
     rpc,
@@ -76,6 +77,50 @@ import { getBackendFs } from './platform-fs.mjs'
 let _initPromise = null
 let _writableCheckTimer = null
 let inviteUsesRemaining = 0
+
+// One local writer core per JOINED base. Reusing the pre-join 'local' core
+// across a base switch leaks blocks written under the previous base's
+// encryption into the joined base's writer log; the writer pipeline hits
+// DECODING_ERROR on block 0, freezes silently, and from then on every
+// autobase.append busy-loops at full CPU without ever resolving (the
+// 2026-06-11 cross-device wedge). The scope name is derivable both from the
+// invite before pairing and from the stored base key after a restart
+// (discoveryKey is a hash of the base key), and corestore derives the same
+// keypair for it on every open of the same storage root.
+const LOCAL_WRITER_SCOPE_USERDATA = 'listam/local-writer-scope'
+
+function joinedWriterScopeName(baseDiscoveryKey) {
+    return `local-join-${b4a.toString(baseDiscoveryKey, 'hex')}`
+}
+
+// The key the host must authorize is the writer CORE key (manifest-derived),
+// not the raw signing key; getLocalKey opens the core exactly the way
+// autobase's boot will and reports the key it ends up with.
+async function deriveJoinedWriter(baseDiscoveryKey) {
+    const scopeName = joinedWriterScopeName(baseDiscoveryKey)
+    const keyPair = await store.createKeyPair(scopeName)
+    const writerKey = await Autobase.getLocalKey(store, { keyPair })
+    return { scopeName, keyPair, writerKey }
+}
+
+// Read the scope recorded at join time from the well-known 'local' core and
+// validate it against the base being opened — a scope minted for a different
+// base (e.g. after a join rollback reopens the previous base) is ignored, so
+// older bases keep their original 'local' writer untouched.
+async function loadScopedWriterKeyPair(forBaseKey) {
+    const lc = store.get({ name: 'local' })
+    await lc.ready()
+    let scopeRaw = null
+    try {
+        scopeRaw = await lc.getUserData(LOCAL_WRITER_SCOPE_USERDATA)
+    } finally {
+        await lc.close()
+    }
+    if (!scopeRaw) return null
+    const expected = joinedWriterScopeName(hypercoreCrypto.discoveryKey(forBaseKey))
+    if (b4a.toString(scopeRaw) !== expected) return null
+    return store.createKeyPair(expected)
+}
 
 // Temp swarm/pairing kept alive until waitForWritable completes
 let _tempSwarm = null
@@ -485,6 +530,7 @@ export async function initAutobase(newBaseKey, options = {}) {
         // encryption key instead of the one received via blind pairing.
         // On a normal restart (same base key), we must NOT clear — doing
         // so would wipe the boot record and break persistence.
+        let scopedWriterKeyPair = null
         if (baseKey) {
             const lc = store.get({ name: 'local' })
             await lc.ready()
@@ -496,13 +542,16 @@ export async function initAutobase(newBaseKey, options = {}) {
                 logger.log('[INFO] Cleared stale local-core user data (base key changed)')
             }
             await lc.close()
+            scopedWriterKeyPair = await loadScopedWriterKeyPair(baseKey)
+            if (scopedWriterKeyPair) logger.log('[INFO] Using joined-base scoped local writer')
         }
 
         const autobaseOpts = {
             apply, open,
             valueEncoding: 'json',
             encrypt: true,
-            encryptionKey: encryptionKey || undefined
+            encryptionKey: encryptionKey || undefined,
+            ...(scopedWriterKeyPair ? { keyPair: scopedWriterKeyPair } : {})
         }
         setAutobase(new Autobase(store, baseKey, autobaseOpts))
         logger.log('[INFO] Calling autobase.ready()... encKey:', encryptionKey ? 'present' : 'none')
@@ -624,6 +673,11 @@ export async function initAutobase(newBaseKey, options = {}) {
         // Create invite and send to frontend
         const z32Invite = createInvite()
         sendInviteKeyToFrontend(z32Invite || '')
+
+        // Tell clients whether this base was joined as a guest (the scoped
+        // writer exists only for joined bases): a restarted guest must keep
+        // reporting joined without ever seeing a live join-success event.
+        broadcastMessage({ type: 'base-state', joined: Boolean(scopedWriterKeyPair) })
     })()
 
     try {
@@ -756,14 +810,21 @@ export async function joinViaInvite(z32InviteStr) {
             // Notify frontend: phase 1 — pairing
             broadcastJoinPhase('pairing')
 
-            // 1. Derive writer key from the already-open autobase's local core.
-            //    autobase.local.key is stable across teardown/reinit of the same
-            //    storage path, so the host will add the right key.
-            if (!autobase?.local?.key) {
-                throw new Error('autobase.local.key unavailable — cannot derive writer key')
+            // 1. Derive a writer key SCOPED TO THE BASE WE ARE JOINING (see
+            //    LOCAL_WRITER_SCOPE_USERDATA above) from the invite's discovery
+            //    key. The keypair is deterministic for this storage root, so
+            //    the same key is rebuilt after the post-pairing initAutobase
+            //    and after every restart — the host authorizes the right core.
+            if (!store) {
+                throw new Error('corestore unavailable — cannot derive writer key')
             }
-            const localWriterKey = autobase.local.key
-            logger.log('[INFO] Guest localWriterKey ready')
+            const inviteInfo = BlindPairing.decodeInvite(z32.decode(normalizedInvite))
+            if (!inviteInfo?.discoveryKey) {
+                throw new Error('Invite does not carry a base discovery key')
+            }
+            const joinedWriter = await deriveJoinedWriter(inviteInfo.discoveryKey)
+            const localWriterKey = joinedWriter.writerKey
+            logger.log('[INFO] Guest localWriterKey ready (joined-base scope)')
 
             // 2. Temp swarm for blind pairing only.
             //    DO NOT close the candidate in onadd — closing it kills the
@@ -809,6 +870,18 @@ export async function joinViaInvite(z32InviteStr) {
             logger.log('[INFO] Blind pairing succeeded')
             logger.log('[INFO] Temp swarm connections after pairing:', _tempSwarm.connections.size)
 
+            // Record the writer scope on the well-known 'local' core BEFORE
+            // re-initializing, so initAutobase (now and on every restart of
+            // this joined base) derives the same scoped writer keypair. A
+            // later rollback to the previous base ignores it because the
+            // scope name embeds this base's discovery key.
+            {
+                const lc = store.get({ name: 'local' })
+                await lc.ready()
+                await lc.setUserData(LOCAL_WRITER_SCOPE_USERDATA, b4a.from(joinedWriter.scopeName))
+                await lc.close()
+            }
+
             // 3. Use initAutobase to set up the joined base — same proven code
             //    path the host uses. Set encryption key first so initAutobase
             //    picks it up.
@@ -820,6 +893,17 @@ export async function joinViaInvite(z32InviteStr) {
             await saveEpochKey(inviteEpoch.epochKey)
             setEncryptionKey(result.encryptionKey)
             await initAutobase(result.key, { allowOwnerMigration: false })
+
+            // Commit the joined credentials NOW: the epoch keys are already
+            // saved above and the runtime is on the joined base, so deferring
+            // these to the writability paths loses them whenever the host
+            // authorized our writer during pairing (the "already writable"
+            // shortcut) — a restart then silently booted the previous base
+            // with mixed epoch state. A later rollback re-saves the previous
+            // credentials through its own initAutobase, so this stays
+            // consistent on failure too.
+            await saveAutobaseKey(result.key)
+            await saveEncryptionKey(result.encryptionKey)
 
             logger.log('[INFO] Guest initAutobase complete. writable:', autobase?.writable, '| swarm connections:', swarm?.connections?.size)
 

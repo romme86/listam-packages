@@ -265,21 +265,20 @@ async function handleFrontendRequest(req, error) {
         switch (req.command) {
             case RPC_ADD: {
                 const payload = JSON.parse(b4a.toString(req.data))
-                if (typeof payload === 'string') {
-                    await addItem(payload)
-                } else {
-                    await addItem(payload?.text, payload?.listId, payload?.listType)
-                }
+                const ok = typeof payload === 'string'
+                    ? await addItem(payload)
+                    : await addItem(payload?.text, payload?.listId, payload?.listType)
+                replyMutationResult(req, ok)
                 break
             }
             case RPC_UPDATE: {
                 const data = JSON.parse(req.data.toString())
-                await updateItem(data.item)
+                replyMutationResult(req, await updateItem(data.item))
                 break
             }
             case RPC_DELETE: {
                 const data = JSON.parse(req.data.toString())
-                await deleteItem(data.item)
+                replyMutationResult(req, await deleteItem(data.item))
                 break
             }
             case RPC_GET_KEY: {
@@ -375,6 +374,20 @@ function parseRpcJson(data) {
         return JSON.parse(data.toString())
     } catch {
         return null
+    }
+}
+
+// Answer the requester with the mutation outcome where the transport supports
+// replies (the in-process desktop/headless channel and the node test rpc do;
+// bare-rpc requests also expose reply but the mobile app does not read it
+// yet). Without this a refused mutation — not writable, or sync stalled with
+// no reachable peer — is indistinguishable from a committed one.
+function replyMutationResult(req, ok) {
+    if (typeof req?.reply !== 'function') return
+    try {
+        req.reply(JSON.stringify({ ok: ok !== false, reason: ok !== false ? null : 'mutation-refused' }))
+    } catch (e) {
+        logger.log('[ERROR] Failed to reply with mutation result:', e)
     }
 }
 

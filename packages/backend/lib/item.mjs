@@ -17,6 +17,54 @@ import { createViewCheckpoint } from './view-checkpoint.mjs'
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
 let _writeChain = Promise.resolve()
 
+// autobase.append only completes once the local writer pipeline can flush the
+// new node, and when it cannot (writer not "idle", e.g. after a writer-set
+// reorg with every peer and the DHT unreachable) autobase retries in an
+// unbounded zero-delay loop — the wedge-repro measured ~1.6M iterations/s at
+// 99% CPU with the append promise never settling. While a peer is reachable
+// the pipeline catches up in well under a second, so a writer that stays
+// unflushable for a few seconds means the device is cut off and the mutation
+// must be refused instead of started.
+const FLUSHABLE_WAIT_MS = 4000
+const FLUSHABLE_POLL_MS = 200
+
+async function waitForFlushableWriter () {
+    const deadline = Date.now() + FLUSHABLE_WAIT_MS
+    for (;;) {
+        if (!autobase || autobase.closing) return false
+        try {
+            const writer = autobase.localWriter
+            if (writer && !writer.closed && writer.idle()) return true
+        } catch {
+            // localWriter.idle() is internal autobase API; if it changes shape,
+            // fail open to the pre-gate behavior rather than refusing writes.
+            return true
+        }
+        if (Date.now() >= deadline) return false
+        // A stalled pipeline does not catch up on its own — each bounded
+        // update() runs one linearizer advance cycle, which is what ingests
+        // the local core after a writer-set reorg. With a reachable peer one
+        // or two cycles settle it; without one it stays stalled and we refuse.
+        try {
+            await autobase.update()
+        } catch (e) {
+            logger.log('[WARNING] autobase.update failed while waiting for flushable writer:', e?.message ?? e)
+        }
+        await new Promise((resolve) => setTimeout(resolve, FLUSHABLE_POLL_MS))
+    }
+}
+
+function refuseStalledMutation (operationType) {
+    logger.log(`[WARNING] ${operationType} refused; local writer cannot flush (peers/DHT unreachable?)`)
+    try {
+        const req = rpc.request(RPC_MESSAGE)
+        req.send(JSON.stringify({ type: 'sync-stalled', message: 'Cannot save changes: this device cannot reach any peer to sync with.' }))
+    } catch (e) {
+        logger.log('[ERROR] Failed to send sync-stalled message:', e)
+    }
+    return false
+}
+
 // Exported so the membership re-key flow (rekey.mjs) can serialize its
 // epoch-rotation appends against list writes through the same chain — otherwise
 // a concurrent addItem could land between the epoch flip and the re-encrypted
@@ -68,6 +116,7 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
+        if (!(await waitForFlushableWriter())) return refuseStalledMutation('ADD')
         // Get length before append to verify it increases
         // const lengthBefore = autobase.local.length
 
@@ -116,6 +165,7 @@ export async function updateItem (item) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
+        if (!(await waitForFlushableWriter())) return refuseStalledMutation('UPDATE')
         const lengthBefore = autobase.local.length
 
         await autobase.append(prepareListAppendOperation(op))
@@ -159,6 +209,7 @@ export async function deleteItem (item) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
+        if (!(await waitForFlushableWriter())) return refuseStalledMutation('DELETE')
         const lengthBefore = autobase.local.length
 
         await autobase.append(prepareListAppendOperation(op))
