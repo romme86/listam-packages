@@ -44,6 +44,13 @@ test('note with both markers has high confidence', () => {
     assert.ok(r.confidence >= 0.9)
 })
 
+test('note accepts the "and note" STT mishearing of the end marker', () => {
+    const r = parseIntent('note call the plumber and note')
+    assert.equal(r.intent, 'note')
+    assert.equal(r.slots.text, 'call the plumber')
+    assert.ok(r.confidence >= 0.9)
+})
+
 test('note without an end marker still parses, lower confidence', () => {
     const r = parseIntent('note buy a birthday gift')
     assert.equal(r.intent, 'note')

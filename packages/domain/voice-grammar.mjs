@@ -24,7 +24,8 @@ const GRAMMARS = {
     en: {
         add: { verbs: ['add', 'put'], joiners: ['to', 'on', 'in', 'into'] },
         remove: { verbs: ['remove', 'delete', 'take off'] },
-        note: { starts: ['note', 'new note', 'take a note'], ends: ['end note', 'end of note'] },
+        // 'and note' is a frequent STT mishearing of the "end note" terminator.
+        note: { starts: ['note', 'new note', 'take a note'], ends: ['end note', 'end of note', 'and note'] },
     },
     es: {
         add: { verbs: ['anade', 'agrega', 'agregar', 'anadir', 'pon'], joiners: ['a', 'en', 'a la', 'al'] },
