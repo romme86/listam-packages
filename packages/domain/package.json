@@ -28,6 +28,12 @@
     "./list-nav": {
       "types": "./list-nav.d.ts",
       "default": "./list-nav.mjs"
+    },
+    "./voice-grammar": {
+      "default": "./voice-grammar.mjs"
+    },
+    "./voice-intent": {
+      "default": "./voice-intent.mjs"
     }
   },
   "files": [
@@ -43,6 +49,8 @@
     "list-registry.d.ts",
     "list-nav.mjs",
     "list-nav.d.ts",
+    "voice-grammar.mjs",
+    "voice-intent.mjs",
     "LICENSE"
   ],
   "publishConfig": {
