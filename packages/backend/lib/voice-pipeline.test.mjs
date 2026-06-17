@@ -7,6 +7,8 @@ import assert from 'node:assert/strict'
 import { parseIntent } from '@listam/domain/voice-intent'
 import { createStt } from './stt/index.mjs'
 import { createVoiceController } from './voice-controller.mjs'
+import { encodeFrame, FRAME, createFrameParser } from './audio-bridge.mjs'
+import { createUtteranceAssembler } from './voice-bridge.mjs'
 
 const REGISTRY = [
     { id: 'groc1', listId: '__registry__', listType: 'registry', regKind: 'list', regName: 'Groceries', regType: 'shopping', updatedAt: 1 },
@@ -59,4 +61,44 @@ test('unrecognized utterance -> unknownCommand, no writes', async () => {
     const r = await run()
     assert.equal(r.code, 'unknownCommand')
     assert.equal(calls.add.length + calls.del.length, 0)
+})
+
+// Mirrors the exact headless service wiring: leaf audio frames decode + reassemble
+// into an utterance, which flows through the same onUtterance handler (fixture STT
+// -> parseIntent -> controller) whose add/delete adapters call the backend RPC
+// channel (here a mock channel.client.send returning a mutation reply).
+test('audio frames -> assembler -> onUtterance -> RPC send (service path)', async () => {
+    const RPC_ADD = 2
+    const sent = []
+    const send = async (rpc, payload) => { sent.push({ rpc, payload }); return JSON.stringify({ ok: true }) }
+    const reply = (raw) => { try { return JSON.parse(raw)?.ok !== false } catch { return true } }
+
+    const controller = createVoiceController({
+        addItem: async (text, listId, listType) => reply(await send(RPC_ADD, { text, listId, listType })),
+        deleteItem: async (item) => reply(await send(4, { item })),
+        getAllItems: async () => [],
+        getRegistryItems: async () => [],
+        notesListId: 'voicenotes',
+    })
+    const stt = createStt({ engine: 'fixture', config: { transcribe: async () => ({ text: 'note buy milk end note', locale: 'en' }) } })
+    const onUtterance = async (utt) => {
+        const { text, locale } = await stt.transcribe(utt)
+        return controller.execute(parseIntent(text, locale))
+    }
+
+    let pending = null
+    const assembler = createUtteranceAssembler({ onUtterance: (u) => { pending = onUtterance(u) } })
+    const parser = createFrameParser()
+    const feed = (frame) => { for (const f of parser.push(frame)) assembler.onFrame(f) }
+
+    const startP = Buffer.alloc(5); startP[0] = 2; startP.writeUInt32LE(0, 1)
+    feed(encodeFrame(FRAME.START, startP))
+    feed(encodeFrame(FRAME.CHUNK, Buffer.from([1, 0, 2, 0])))
+    feed(encodeFrame(FRAME.END, Buffer.from([0])))
+
+    const result = await pending
+    assert.equal(result.code, 'noteSaved')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].rpc, RPC_ADD)
+    assert.deepEqual(sent[0].payload, { text: 'buy milk', listId: 'voicenotes', listType: 'notes' })
 })
