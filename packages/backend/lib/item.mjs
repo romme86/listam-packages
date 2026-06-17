@@ -2,8 +2,8 @@
 // Add item operation (backend creates the canonical item)
 import {RPC_MESSAGE} from "@listam/protocol";
 import {generateId} from "./util.mjs";
-import {autobase, store, rpc, currentList, epochKey, membershipState} from './state.mjs'
-import {SYNC_LIST} from "@listam/protocol";
+import {autobase, store, rpc, currentList, epochKey, membershipState, boardConfigState} from './state.mjs'
+import {SYNC_LIST, RPC_ADD_FROM_BACKEND} from "@listam/protocol";
 import { logger } from "./logger.mjs"
 import { createEncryptedListOperation } from './key-epochs.mjs'
 import {
@@ -13,6 +13,7 @@ import {
     normalizeListItem,
 } from './list-reducer.mjs'
 import { createViewCheckpoint } from './view-checkpoint.mjs'
+import { isBoardType, applyStatusTransition, doneStatusesOf } from './board.mjs'
 
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
 let _writeChain = Promise.resolve()
@@ -75,7 +76,35 @@ export function enqueueWrite (fn) {
     return _writeChain
 }
 
-export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAULT_LIST_TYPE) {
+// Fields a client may supply when creating a board ticket. Server-controlled
+// fields (createdBy/completedBy/timeliness/inProgressSince/actualInProgressHours)
+// are deliberately excluded so they cannot be forged on create.
+const TICKET_CREATE_FIELDS = ['description', 'checklist', 'estimatedHours', 'estimatedComplexity', 'priority', 'assignee', 'dueAt', 'status', 'blocks', 'blockedReason']
+
+function pickTicketExtra (extra) {
+    const out = {}
+    for (const key of TICKET_CREATE_FIELDS) {
+        if (extra[key] !== undefined) out[key] = extra[key]
+    }
+    return out
+}
+
+function localWriterKeyHex () {
+    try {
+        return autobase?.local?.key ? autobase.local.key.toString('hex') : null
+    } catch {
+        return null
+    }
+}
+
+function findCurrentItem (item) {
+    if (!Array.isArray(currentList)) return null
+    const id = item?.id
+    if (!id) return null
+    return currentList.find((entry) => entry && entry.id === id) || null
+}
+
+export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAULT_LIST_TYPE, extra = null) {
     if (!autobase) {
         logger.log('[WARNING] addItem called before Autobase is initialized')
         return false
@@ -105,6 +134,21 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
         timeOfCompletion: 0,
         updatedAt: now,
         timestamp: now,
+    }
+
+    // Board tickets carry extra fields supplied by the frontend on create.
+    // Merge a whitelisted subset, then stamp server-controlled fields (author,
+    // status/timer invariants) so a client cannot forge them.
+    if (extra && typeof extra === 'object') {
+        Object.assign(item, pickTicketExtra(extra))
+    }
+    if (isBoardType(item.listType)) {
+        item.status = typeof item.status === 'string' ? item.status : 'todo'
+        item.isDone = item.status === 'done'
+        if (typeof item.inProgressMs !== 'number') item.inProgressMs = 0
+        item.inProgressSince = item.status === 'in_progress' ? now : null
+        const createdBy = localWriterKeyHex()
+        if (createdBy) item.createdBy = createdBy
     }
 
     const op = createListOperation('add', item, { listId, listType })
@@ -153,10 +197,18 @@ export async function updateItem (item) {
 
     logger.log('[INFO] Command RPC_UPDATE updateItem')
 
-    const op = createListOperation('update', {
-        ...item,
-        updatedAt: typeof item?.updatedAt === 'number' ? item.updatedAt : Date.now(),
-    })
+    const now = typeof item?.updatedAt === 'number' ? item.updatedAt : Date.now()
+    let nextItem = { ...item, updatedAt: now }
+    if (item && isBoardType(item.listType)) {
+        // Freeze time-in-progress and the on-time verdict at the source writer,
+        // so every peer receives the same computed values rather than each
+        // recomputing from another peer's clock.
+        nextItem = applyStatusTransition(findCurrentItem(item), nextItem, now, {
+            writerKey: localWriterKeyHex(),
+            doneStatuses: doneStatusesOf(boardConfigState?.config),
+        })
+    }
+    const op = createListOperation('update', nextItem)
     if (!op) return false
 
     return enqueueWrite(async () => {
@@ -292,7 +344,7 @@ export function resetViewCheckpoint() {
 async function updateViewCheckpoint(caller) {
     if (!autobase || !autobase.view) {
         logger.log(`[WARNING] ${caller}: autobase or view not available`)
-        return { items: [], membershipRecords: [] }
+        return { items: [], allItems: [], membershipRecords: [] }
     }
     await autobase.update()
     return _viewCheckpoint.update(autobase.view, {
@@ -305,6 +357,37 @@ async function updateViewCheckpoint(caller) {
 export async function rebuildListFromPersistedOps() {
     const { items } = await updateViewCheckpoint('rebuildListFromPersistedOps')
     return items
+}
+
+// Items that live OUTSIDE the default list: registry meta-items, board
+// tickets, and any additional list. `currentList`/`syncListToFrontend` are
+// single-list-scoped (they only carry the default list), so on a restart these
+// would never reach the frontend and created lists/tickets would vanish. We
+// surface them here so they can be re-projected per item.
+export async function rebuildExtraListItems() {
+    const { items, allItems = [] } = await updateViewCheckpoint('rebuildExtraListItems')
+    const defaultIds = new Set(items.map((it) => it && it.id).filter(Boolean))
+    return allItems.filter((it) => it && it.id && !defaultIds.has(it.id))
+}
+
+// Push each item to the frontend as an individual add. Unlike SYNC_LIST (which
+// the frontend folds into the *selected* list), the per-item add path routes
+// each entry to its own listId bucket, so registry meta-items and board
+// tickets land where they belong. Upsert semantics make this idempotent.
+export function projectItemsToFrontend(items) {
+    if (!rpc || !Array.isArray(items) || items.length === 0) return
+    let projected = 0
+    for (const item of items) {
+        if (!item) continue
+        try {
+            const req = rpc.request(RPC_ADD_FROM_BACKEND)
+            req.send(JSON.stringify(item))
+            projected++
+        } catch (e) {
+            logger.log('[ERROR] Failed to project item to frontend:', e)
+        }
+    }
+    if (projected > 0) logger.log('[INFO] Re-projected extra-list items to frontend:', projected)
 }
 
 // Read the owner-signed membership records that apply() persisted into the view,

@@ -1,11 +1,15 @@
 import { EN_MESSAGES } from './catalogs/en.mjs'
 import { ES_MESSAGES } from './catalogs/es.mjs'
+import { DE_MESSAGES } from './catalogs/de.mjs'
+import { FR_MESSAGES } from './catalogs/fr.mjs'
+import { IT_MESSAGES } from './catalogs/it.mjs'
+import { PT_MESSAGES } from './catalogs/pt.mjs'
 
 export const DEFAULT_LOCALE = 'en'
 export const PSEUDO_LOCALE = 'en-XA'
 export const LONG_LOCALE = 'en-XL'
 export const SYSTEM_LOCALE_CHOICE = 'system'
-export const SUPPORTED_UI_LOCALES = ['en', 'es']
+export const SUPPORTED_UI_LOCALES = ['en', 'es', 'de', 'fr', 'it', 'pt']
 export const SPECIAL_TEST_LOCALES = [PSEUDO_LOCALE, LONG_LOCALE]
 export const LOCALE_CHOICES = [SYSTEM_LOCALE_CHOICE, ...SUPPORTED_UI_LOCALES, ...SPECIAL_TEST_LOCALES]
 export const GROCERY_LOCALES = ['en', 'it', 'de', 'nl', 'es', 'pt', 'fr', 'zh', 'ru', 'ja', 'ko', 'ar', 'hi']
@@ -13,12 +17,20 @@ export const GROCERY_LOCALES = ['en', 'it', 'de', 'nl', 'es', 'pt', 'fr', 'zh', 
 export const catalogByLocale = {
     en: EN_MESSAGES,
     es: ES_MESSAGES,
+    de: DE_MESSAGES,
+    fr: FR_MESSAGES,
+    it: IT_MESSAGES,
+    pt: PT_MESSAGES,
 }
 
 export const LOCALE_LABEL_KEYS = {
     system: 'app.locale.system',
     en: 'app.locale.english',
     es: 'app.locale.spanish',
+    de: 'app.locale.german',
+    fr: 'app.locale.french',
+    it: 'app.locale.italian',
+    pt: 'app.locale.portuguese',
     [PSEUDO_LOCALE]: 'app.locale.pseudo',
     [LONG_LOCALE]: 'app.locale.long',
 }

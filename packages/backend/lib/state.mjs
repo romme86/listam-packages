@@ -28,6 +28,12 @@ export let membershipState = {
     removedWriters: new Map(),
 }
 
+// Reduced board configuration (rigor mode, states, properties, rules,
+// automations), rebuilt from owner-signed board-config records in the view.
+// `config: null` until the first apply() pass populates it (callers fall back
+// to defaults). Not durable in memory — only the records in the view are.
+export let boardConfigState = { highestSequence: 0, updatedAt: 0, config: null }
+
 // Blind pairing
 export let pairing = null             // BlindPairing instance
 export let pairingMember = null       // BlindPairing member (host-side handler)
@@ -73,6 +79,7 @@ export function setOwnerAuthorityKeyPair(val) { ownerAuthorityKeyPair = val }
 export function setEpochKey(val) { epochKey = val }
 export function setEpochEncryptionKeyPair(val) { epochEncryptionKeyPair = val }
 export function setMembershipState(val) { membershipState = val }
+export function setBoardConfigState(val) { boardConfigState = val }
 export function setPairing(val) { pairing = val }
 export function setPairingMember(val) { pairingMember = val }
 export function setCurrentInvite(val) { currentInvite = val }

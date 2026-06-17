@@ -20,3 +20,5 @@ export const RPC_RECOVER_STORAGE: 18
 export const RPC_CONTROL_PAIR: 19
 export const RPC_CONTROL_COMMAND: 20
 export const RPC_CONTROL_LIST: 21
+export const RPC_SET_BOARD_CONFIG: 22
+export const RPC_GET_BOARD_CONFIG: 23

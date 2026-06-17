@@ -1,5 +1,6 @@
 export const DEFAULT_LIST_ID: 'default'
 export const DEFAULT_LIST_TYPE: 'shopping'
+export const TODO_LIST_TYPE: 'todo'
 
 export type ListLikeEntry = {
     id?: string
@@ -13,6 +14,7 @@ export type ListLikeEntry = {
 
 export function normalizeListId(value: unknown): string
 export function normalizeListType(value: unknown): string
+export function isTodoType(value: unknown): boolean
 export function legacyItemId(text: string, listId?: string): string
 export function normalizeItemId(item: ListLikeEntry | null | undefined): string | null
 export function identityKey(item: ListLikeEntry | null | undefined): string

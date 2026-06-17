@@ -70,13 +70,20 @@ import {
     isPendingJoinSuccess,
     setIsPendingJoinSuccess
 } from "./state.mjs"
-import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, readPersistedMembershipRecords, resetViewCheckpoint, syncListToFrontend } from "./item.mjs"
+import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, rebuildExtraListItems, projectItemsToFrontend, readPersistedMembershipRecords, resetViewCheckpoint, syncListToFrontend } from "./item.mjs"
 import { logger } from "./logger.mjs"
 import { getBackendFs } from './platform-fs.mjs'
 
 let _initPromise = null
 let _writableCheckTimer = null
 let inviteUsesRemaining = 0
+
+// Network-status reporting (the header readiness dot). Each initAutobase pass
+// builds a fresh swarm; _netStatusGen guards listeners so a torn-down base's
+// dht events can never broadcast over the new base. _lastNetStatus dedupes so
+// the frontend only sees real transitions.
+let _netStatusGen = 0
+let _lastNetStatus = null
 
 // One local writer core per JOINED base. Reusing the pre-join 'local' core
 // across a base switch leaks blocks written under the previous base's
@@ -166,6 +173,7 @@ function waitForWritable() {
             const list = await rebuildListFromPersistedOps()
             setCurrentList(list)
             if (list.length > 0) syncListToFrontend(list)
+            projectItemsToFrontend(await rebuildExtraListItems())
         } catch (_) {}
 
         // Log status every 10 attempts
@@ -189,6 +197,7 @@ function waitForWritable() {
                 // Already connected, done!
                 setIsPendingJoinSuccess(false)
                 broadcastMessage({ type: 'join-success' })
+                broadcastNetworkStatus()
                 cleanupTempSwarm()
                 return
             }
@@ -206,6 +215,7 @@ function waitForWritable() {
             const tempConns = _tempSwarm?.connections?.size ?? 0
             logger.log(`[ERROR] Timed out waiting for write access after ${attempts} attempts. view=${viewLen}, mainSwarm=${mainConns}, tempSwarm=${tempConns}`)
             broadcastMessage({ type: 'join-error', message: 'Timed out waiting for write access from host.' })
+            broadcastNetworkStatus()
             cleanupTempSwarm()
             return
         }
@@ -229,6 +239,7 @@ function waitForPeerConnection(remainingAttempts) {
             setIsPendingJoinSuccess(false)
             logger.log('[INFO] Guest main swarm connected after', attempts, 'syncing attempt(s)')
             broadcastMessage({ type: 'join-success' })
+            broadcastNetworkStatus()
             return
         }
 
@@ -237,6 +248,7 @@ function waitForPeerConnection(remainingAttempts) {
             setIsPendingJoinSuccess(false)
             logger.log('[INFO] Syncing phase timed out, but guest is writable — sending join-success anyway')
             broadcastMessage({ type: 'join-success' })
+            broadcastNetworkStatus()
             return
         }
 
@@ -421,6 +433,9 @@ async function tearDownAutobaseSwarmStore() {
             logger.log('[ERROR] Error destroying swarm:', e)
         }
         setSwarm(null)
+        // Invalidate stale dht listeners and report "connecting" (no swarm).
+        _netStatusGen++
+        broadcastNetworkStatus()
     }
 
     // 4. Close old store
@@ -606,6 +621,7 @@ export async function initAutobase(newBaseKey, options = {}) {
         const rebuiltList = await rebuildListFromPersistedOps()
         setCurrentList(rebuiltList)
         syncListToFrontend(rebuiltList)
+        projectItemsToFrontend(await rebuildExtraListItems())
         broadcastMembershipRoster()
 
         // Add static peers only once
@@ -629,6 +645,12 @@ export async function initAutobase(newBaseKey, options = {}) {
         setPeerCount(0)
         broadcastPeerCount()
 
+        // New replication swarm coming up — invalidate any previous base's
+        // network-status listeners and report "connecting" until the DHT
+        // bootstraps or a peer connects.
+        const netGen = ++_netStatusGen
+        _lastNetStatus = null
+
         // Use discoveryKey as swarm topic (NOT autobase.key)
         const topic = autobase.discoveryKey
         logger.log('[INFO] Discovery topic (replication swarm) ready')
@@ -643,6 +665,7 @@ export async function initAutobase(newBaseKey, options = {}) {
         }
 
         setSwarm(new Hyperswarm(swarmOptions()))
+        broadcastNetworkStatus()
         swarm.on('error', (err) => {
             logger.log('[ERROR] Replication swarm error:', err)
         })
@@ -653,9 +676,11 @@ export async function initAutobase(newBaseKey, options = {}) {
             })
             setPeerCount(swarm.connections.size)
             broadcastPeerCount()
+            broadcastNetworkStatus()
             conn.on('close', () => {
                 setPeerCount(swarm.connections.size)
                 broadcastPeerCount()
+                broadcastNetworkStatus()
             })
             if (autobase) {
                 autobase.replicate(conn)
@@ -663,9 +688,12 @@ export async function initAutobase(newBaseKey, options = {}) {
                 logger.log('[WARNING] No Autobase yet to replicate with')
             }
         })
+        // Track DHT reachability transitions for the header dot.
+        wireNetworkStatusSignals(netGen)
         setDiscovery(swarm.join(topic, { server: true, client: true }))
         await discovery.flushed()
         logger.log('[INFO] Joined replication swarm for current base')
+        broadcastNetworkStatus()
 
         // Set up blind pairing for accepting joiners
         setupBlindPairing()
@@ -1067,6 +1095,46 @@ export async function recoverOwnerAuthority(code) {
 
 function broadcastPeerCount() {
     broadcastMessage({ type: 'peer-count', count: peerCount })
+}
+
+// Map the live swarm/DHT state to the three states the header dot shows:
+//   'online'     — on the p2p network (a peer is connected, or the DHT has
+//                  bootstrapped and reports itself reachable). GREEN.
+//   'offline'    — the DHT bootstrapped but its health monitor sees no
+//                  reachable nodes (e.g. airplane mode). GREY.
+//   'connecting' — no swarm yet, or the DHT is still bootstrapping. BLINKING.
+// connections.size is the fast, definitive signal; dht.online is the
+// (optimistic, health-monitored) fallback for the no-peers-but-online case.
+// discovery.flushed() is deliberately NOT used: it resolves even when fully
+// offline, so it cannot distinguish online from offline.
+function currentNetworkStatus() {
+    if (!swarm) return 'connecting'
+    if ((swarm.connections?.size ?? 0) > 0) return 'online'
+    const dht = swarm.dht
+    if (!dht || !dht.bootstrapped) return 'connecting'
+    return dht.online ? 'online' : 'offline'
+}
+
+function broadcastNetworkStatus() {
+    let status = currentNetworkStatus()
+    // A guest mid-join replicates over the temp swarm while the main swarm is
+    // still finding the host on the DHT — never flash "no connection" then.
+    if (status === 'offline' && isPendingJoinSuccess) status = 'connecting'
+    if (status === _lastNetStatus) return
+    _lastNetStatus = status
+    broadcastMessage({ type: 'network-status', status })
+}
+
+// Subscribe to the DHT's reachability transitions for the current swarm. `gen`
+// pins these handlers to the initAutobase pass that created the swarm, so a
+// later base switch (which destroys this swarm/dht) can't deliver stale events.
+function wireNetworkStatusSignals(gen) {
+    const dht = swarm?.dht
+    if (!dht) return
+    const onUpdate = () => { if (gen === _netStatusGen) broadcastNetworkStatus() }
+    if (dht.bootstrapped) onUpdate()
+    else dht.once('ready', onUpdate)
+    dht.on('network-update', onUpdate)
 }
 
 function broadcastJoinPhase(phase) {

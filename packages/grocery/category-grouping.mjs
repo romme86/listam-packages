@@ -2,10 +2,23 @@ import { CATEGORY_ORDER } from './category-constants.mjs'
 import { getCategoryForItem, detectDominantLanguage } from './category-lookup.mjs'
 import { CATEGORY_TRANSLATIONS } from './category-translations.mjs'
 
+const VALID_CATEGORIES = new Set(CATEGORY_ORDER)
+
 export function getDisplayCategoryName(canonicalKey, lang) {
     return CATEGORY_TRANSLATIONS[canonicalKey]?.[lang]
         ?? CATEGORY_TRANSLATIONS[canonicalKey]?.en
         ?? canonicalKey
+}
+
+// An entry may pin itself to a category the text classifier wouldn't pick —
+// e.g. the user dragged it there. A non-empty `categoryOverride` that names a
+// known canonical category wins over text classification.
+export function getEntryCategory(entry, lang) {
+    const override = entry?.categoryOverride
+    if (typeof override === 'string' && VALID_CATEGORIES.has(override)) {
+        return override
+    }
+    return getCategoryForItem(entry?.text, lang)
 }
 
 export function groupByCategory(data, preferredLang) {
@@ -16,7 +29,7 @@ export function groupByCategory(data, preferredLang) {
 
     for (let i = 0; i < data.length; i++) {
         const entry = data[i]
-        const category = getCategoryForItem(entry?.text, lang)
+        const category = getEntryCategory(entry, lang)
 
         if (!categoryMap.has(category)) {
             categoryMap.set(category, [])

@@ -16,6 +16,18 @@
     "./list-reducer": {
       "types": "./list-reducer.d.ts",
       "default": "./list-reducer.mjs"
+    },
+    "./board": {
+      "types": "./board.d.ts",
+      "default": "./board.mjs"
+    },
+    "./list-registry": {
+      "types": "./list-registry.d.ts",
+      "default": "./list-registry.mjs"
+    },
+    "./list-nav": {
+      "types": "./list-nav.d.ts",
+      "default": "./list-nav.mjs"
     }
   },
   "files": [
@@ -25,6 +37,12 @@
     "identity.d.ts",
     "list-reducer.mjs",
     "list-reducer.d.ts",
+    "board.mjs",
+    "board.d.ts",
+    "list-registry.mjs",
+    "list-registry.d.ts",
+    "list-nav.mjs",
+    "list-nav.d.ts",
     "LICENSE"
   ],
   "publishConfig": {

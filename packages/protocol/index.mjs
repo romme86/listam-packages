@@ -23,3 +23,8 @@ export const RPC_RECOVER_STORAGE = 18
 export const RPC_CONTROL_PAIR = 19
 export const RPC_CONTROL_COMMAND = 20
 export const RPC_CONTROL_LIST = 21
+// Board configuration (rigor mode, states, properties, rules,
+// automations). The owner-signed record is set by the board creator only;
+// RPC_GET replies over RPC_MESSAGE as { type: 'board-config', ... }.
+export const RPC_SET_BOARD_CONFIG = 22
+export const RPC_GET_BOARD_CONFIG = 23

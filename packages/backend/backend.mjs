@@ -18,10 +18,12 @@ import {
     RPC_RECOVER_STORAGE,
     RPC_CONTROL_PAIR,
     RPC_CONTROL_COMMAND,
-    RPC_CONTROL_LIST
+    RPC_CONTROL_LIST,
+    RPC_SET_BOARD_CONFIG,
+    RPC_GET_BOARD_CONFIG
 } from '@listam/protocol'
 import b4a from 'b4a'
-import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem} from './lib/item.mjs'
+import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, rebuildExtraListItems, projectItemsToFrontend} from './lib/item.mjs'
 import {
     applyOperationToList,
     createListViewEntry,
@@ -33,7 +35,9 @@ import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
-import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation } from './lib/membership.mjs'
+import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
+import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
+import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
@@ -49,11 +53,14 @@ import {
     epochKey,
     epochEncryptionKeyPair,
     membershipState,
+    boardConfigState,
+    ownerAuthorityKeyPair,
     setRpc,
     setCurrentList,
     setBaseKey,
     setEncryptionKey,
     setMembershipState,
+    setBoardConfigState,
     setOwnerAuthorityKeyPair,
     setEpochKey,
     setEpochEncryptionKeyPair
@@ -267,7 +274,7 @@ async function handleFrontendRequest(req, error) {
                 const payload = JSON.parse(b4a.toString(req.data))
                 const ok = typeof payload === 'string'
                     ? await addItem(payload)
-                    : await addItem(payload?.text, payload?.listId, payload?.listType)
+                    : await addItem(payload?.text, payload?.listId, payload?.listType, payload)
                 replyMutationResult(req, ok)
                 break
             }
@@ -339,6 +346,7 @@ async function handleFrontendRequest(req, error) {
             case RPC_REQUEST_SYNC: {
                 logger.log('[INFO] Command RPC_REQUEST_SYNC - frontend requesting current list')
                 syncListToFrontend()
+                projectItemsToFrontend(await rebuildExtraListItems())
                 break
             }
             case RPC_CONTROL_LIST: {
@@ -361,6 +369,36 @@ async function handleFrontendRequest(req, error) {
                 const data = parseRpcJson(req.data)
                 const result = await ensureOwnerControlClient().command(data?.serverPublicKeyHex, data?.command, data?.payload)
                 notifyFrontend({ type: 'owner-control-result', command: data?.command, serverPublicKeyHex: data?.serverPublicKeyHex, result })
+                break
+            }
+            case RPC_SET_BOARD_CONFIG: {
+                logger.log('[INFO] Command RPC_SET_BOARD_CONFIG')
+                const data = parseRpcJson(req.data)
+                if (!autobase || !canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair)) {
+                    notifyFrontend({ type: 'config-denied', reason: 'not-owner' })
+                    break
+                }
+                try {
+                    const base = boardConfigState?.config || normalizeBoardConfig(null)
+                    const merged = normalizeBoardConfig({ ...base, ...(data?.config || {}) })
+                    const record = createBoardConfigRecord({
+                        ownerAuthorityKeyPair,
+                        baseKey: autobase.key.toString('hex'),
+                        config: merged,
+                        sequence: nextBoardConfigSequence(boardConfigState),
+                        createdAt: Date.now(),
+                    })
+                    await autobase.append(record)
+                    await autobase.update()
+                } catch (e) {
+                    logger.log('[ERROR] Failed to set board config:', e)
+                    notifyFrontend({ type: 'config-denied', reason: 'error' })
+                }
+                break
+            }
+            case RPC_GET_BOARD_CONFIG: {
+                logger.log('[INFO] Command RPC_GET_BOARD_CONFIG')
+                broadcastBoardConfig()
                 break
             }
         }
@@ -519,6 +557,14 @@ function notifyFrontend(payload) {
     }
 }
 
+// Push the current board config and whether this device can administer it
+// (holds the board creator's owner authority).
+function broadcastBoardConfig() {
+    const config = boardConfigState?.config || normalizeBoardConfig(null)
+    const canAdminister = canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair)
+    notifyFrontend({ type: 'board-config', config, canAdminister })
+}
+
 // Membership state must be derived from the view, not accumulated in memory
 // across apply() calls: when the indexer set changes (e.g. a writer is added),
 // the linearizer truncates the view and re-runs history through apply. An
@@ -540,8 +586,12 @@ export async function apply (nodes, view, host) {
     }
     logger.log('[INFO] Apply started')
 
-    const { membershipRecords } = await applyMembershipCheckpoint.update(view)
+    const { membershipRecords, boardConfigRecords } = await applyMembershipCheckpoint.update(view)
     setMembershipState(reduceMembershipLog(membershipRecords, { baseKey: autobase?.key }))
+    setBoardConfigState(reduceBoardConfigLog(boardConfigRecords, {
+        baseKey: autobase?.key,
+        ownerAuthorityKey: membershipState.ownerAuthorityKey,
+    }))
 
     for (const { value } of nodes) {
         if (!value) continue
@@ -605,6 +655,24 @@ export async function apply (nodes, view, host) {
             continue
         }
 
+        if (isBoardConfigRecord(value)) {
+            // Only the board creator's signature can change the config (verified
+            // against the membership owner authority). Persist accepted records
+            // into the view so the reduced config survives a restart/reorg.
+            const result = reduceBoardConfigOperation(value, boardConfigState, {
+                baseKey: autobase?.key,
+                ownerAuthorityKey: membershipState.ownerAuthorityKey,
+            })
+            setBoardConfigState(result.state)
+            if (!result.ok) {
+                logger.log('[WARNING] Rejected board-config op', { reason: result.reason })
+                continue
+            }
+            await view.append({ op: 'board-config', record: value })
+            broadcastBoardConfig()
+            continue
+        }
+
         const unwrappedOperation = unwrapListOperation(value)
         if (!unwrappedOperation) continue
 
@@ -623,6 +691,18 @@ export async function apply (nodes, view, host) {
             if (!validateItem(operation.value)) {
                 logger.log('[WARNING] Invalid item schema in add operation:', operation.value)
                 continue
+            }
+            // Rigor gate: when the board creator has rigor mode on, a new board
+            // ticket must carry the required fields. This is the durable,
+            // cluster-wide enforcement behind the frontend's create form — the
+            // reduced config is deterministic across peers at this point in
+            // linearized history, and the default config is rigor ON.
+            if (isBoardType(operation.value.listType) && boardConfigState?.config?.rigorOn) {
+                const check = validateTicketDraft(operation.value, boardConfigState.config)
+                if (!check.ok) {
+                    logger.log('[WARNING] Dropped non-rigor board add (rigor mode on); missing:', check.missing)
+                    continue
+                }
             }
             logger.log('[INFO] Applying add operation for item:', operation.value)
             await view.append(createListViewEntry(operation))

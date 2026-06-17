@@ -156,6 +156,7 @@ export function createListViewEntry(operation) {
 export function normalizeViewEntry(entry) {
     if (!entry || typeof entry !== 'object') return null
     if (entry.op === 'membership') return null
+    if (entry.op === 'board-config') return null
 
     if (entry.op === 'list' && Array.isArray(entry.items)) {
         return createListOperation('list', entry.items, {
@@ -239,6 +240,17 @@ export function createListReduction(options = {}) {
         },
         items(listId = selectedListId) {
             return getListItems(byList, listId)
+        },
+        // Every item across every list bucket, not just the selected list.
+        // Registry meta-items and board tickets live in non-default buckets,
+        // so `items()` alone (single-list-scoped) drops them on a restart
+        // rebuild — `allItems()` is what re-projects them to the frontend.
+        allItems() {
+            const all = []
+            for (const listId of byList.keys()) {
+                for (const item of getListItems(byList, listId)) all.push(item)
+            }
+            return all
         },
     }
 }

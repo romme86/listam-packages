@@ -21,5 +21,6 @@ export function hasLookupToken(text: string, token: string): boolean
 export function containsLookupTerm(text: string, term: string): boolean
 export function detectDominantLanguage(items: string[]): SupportedLang
 export function getCategoryForItem(text: unknown, preferredLang?: SupportedLang): string
+export function getEntryCategory(entry: { text?: string; categoryOverride?: string } | null | undefined, lang?: SupportedLang): string
 export function getDisplayCategoryName(canonicalKey: string, lang: SupportedLang): string
-export function groupByCategory<T extends { text?: string; isDone?: boolean }>(data: T[], preferredLang?: SupportedLang): Array<CategorySection<T>>
+export function groupByCategory<T extends { text?: string; isDone?: boolean; categoryOverride?: string }>(data: T[], preferredLang?: SupportedLang): Array<CategorySection<T>>
