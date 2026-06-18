@@ -37,3 +37,9 @@ export const RPC_GET_BOARD_CONFIG = 23
 export const RPC_EXPORT_DATA = 24
 export const RPC_EXPORT_SEED = 25
 export const RPC_IMPORT = 26
+// Leaf BLE provisioning: a central app asks the backend for the data a leaf
+// needs to be initialized over Bluetooth — the paired hub's control core key
+// and the address(es) the leaf should dial — so the app can write it into the
+// leaf's provisioning GATT service (see @listam/provisioning). Reply over
+// RPC_MESSAGE as { type: 'leaf-provision-info', controlKey, hubAddr, audioAddr }.
+export const RPC_LEAF_PROVISION_INFO = 27

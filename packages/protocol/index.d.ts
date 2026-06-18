@@ -25,3 +25,4 @@ export const RPC_GET_BOARD_CONFIG: 23
 export const RPC_EXPORT_DATA: 24
 export const RPC_EXPORT_SEED: 25
 export const RPC_IMPORT: 26
+export const RPC_LEAF_PROVISION_INFO: 27
