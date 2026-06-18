@@ -20,7 +20,10 @@ import {
     RPC_CONTROL_COMMAND,
     RPC_CONTROL_LIST,
     RPC_SET_BOARD_CONFIG,
-    RPC_GET_BOARD_CONFIG
+    RPC_GET_BOARD_CONFIG,
+    RPC_EXPORT_DATA,
+    RPC_EXPORT_SEED,
+    RPC_IMPORT
 } from '@listam/protocol'
 import b4a from 'b4a'
 import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, rebuildExtraListItems, projectItemsToFrontend} from './lib/item.mjs'
@@ -34,6 +37,7 @@ import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, b
 import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
+import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
@@ -401,6 +405,38 @@ async function handleFrontendRequest(req, error) {
                 broadcastBoardConfig()
                 break
             }
+            case RPC_EXPORT_DATA: {
+                logger.log('[INFO] Command RPC_EXPORT_DATA')
+                const data = parseRpcJson(req.data)
+                await replyBackupResult(req, async () => ({
+                    ok: true,
+                    kind: 'data',
+                    file: await exportDataBackup(data?.password),
+                }))
+                break
+            }
+            case RPC_EXPORT_SEED: {
+                logger.log('[INFO] Command RPC_EXPORT_SEED')
+                const data = parseRpcJson(req.data)
+                await replyBackupResult(req, async () => ({
+                    ok: true,
+                    kind: 'seed',
+                    file: await exportSeedBackup(data?.password),
+                }))
+                break
+            }
+            case RPC_IMPORT: {
+                logger.log('[INFO] Command RPC_IMPORT')
+                const data = parseRpcJson(req.data)
+                await replyBackupResult(req, async () => {
+                    const result = await importBackup(data?.password, data?.file)
+                    if (result.kind === 'data' && result.applied?.boardConfigSkipped) {
+                        notifyFrontend({ type: 'import-board-config-skipped' })
+                    }
+                    return { ok: true, ...result }
+                })
+                break
+            }
         }
     } catch (err) {
         logger.log('[ERROR] Error handling RPC request:', err)
@@ -426,6 +462,35 @@ function replyMutationResult(req, ok) {
         req.reply(JSON.stringify({ ok: ok !== false, reason: ok !== false ? null : 'mutation-refused' }))
     } catch (e) {
         logger.log('[ERROR] Failed to reply with mutation result:', e)
+    }
+}
+
+// Run a backup export/import and reply with the result over the request
+// channel (desktop/headless and the node test rpc support replies; the mobile
+// bridge reads them too for these commands). Errors are mapped to a stable
+// `reason` the frontend turns into a localized message — never a raw stack.
+async function replyBackupResult(req, run) {
+    let payload
+    try {
+        payload = await run()
+    } catch (e) {
+        const message = e?.message || 'error'
+        const reason = message === 'seed-incomplete'
+            ? 'seed-incomplete'
+            : /password|tampered/i.test(message)
+                ? 'bad-password'
+                : /not a valid|corrupt|unrecognized|seed-invalid/i.test(message)
+                    ? 'invalid-file'
+                    : 'error'
+        payload = { ok: false, reason }
+        if (Array.isArray(e?.missing)) payload.missing = e.missing
+        logger.log('[WARNING] Backup operation failed:', reason)
+    }
+    if (typeof req?.reply !== 'function') return
+    try {
+        req.reply(JSON.stringify(payload))
+    } catch (e) {
+        logger.log('[ERROR] Failed to reply with backup result:', e)
     }
 }
 

@@ -22,3 +22,6 @@ export const RPC_CONTROL_COMMAND: 20
 export const RPC_CONTROL_LIST: 21
 export const RPC_SET_BOARD_CONFIG: 22
 export const RPC_GET_BOARD_CONFIG: 23
+export const RPC_EXPORT_DATA: 24
+export const RPC_EXPORT_SEED: 25
+export const RPC_IMPORT: 26

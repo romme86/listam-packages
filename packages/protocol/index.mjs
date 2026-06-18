@@ -28,3 +28,12 @@ export const RPC_CONTROL_LIST = 21
 // RPC_GET replies over RPC_MESSAGE as { type: 'board-config', ... }.
 export const RPC_SET_BOARD_CONFIG = 22
 export const RPC_GET_BOARD_CONFIG = 23
+// Encrypted backup / restore. All three are request/response: the frontend
+// passes { password } (and { file } for import) and reads the reply.
+// RPC_EXPORT_* reply with { ok, kind, file } where `file` is the encrypted
+// envelope text to save. RPC_IMPORT decrypts a saved envelope and branches on
+// its `kind`: 'data' merges the content snapshot (last-write-wins), 'seed'
+// restores this instance's secret identity.
+export const RPC_EXPORT_DATA = 24
+export const RPC_EXPORT_SEED = 25
+export const RPC_IMPORT = 26

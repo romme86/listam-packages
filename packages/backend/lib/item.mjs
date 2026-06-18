@@ -359,6 +359,14 @@ export async function rebuildListFromPersistedOps() {
     return items
 }
 
+// Every materialized item across every list (default list, registry
+// meta-items, board tickets, and any additional list), already decrypted by
+// apply(). Used by the encrypted-backup export to snapshot the full data set.
+export async function rebuildAllItems() {
+    const { allItems = [] } = await updateViewCheckpoint('rebuildAllItems')
+    return allItems
+}
+
 // Items that live OUTSIDE the default list: registry meta-items, board
 // tickets, and any additional list. `currentList`/`syncListToFrontend` are
 // single-list-scoped (they only carry the default list), so on a restart these
