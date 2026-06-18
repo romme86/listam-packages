@@ -21,6 +21,10 @@
       "types": "./board.d.ts",
       "default": "./board.mjs"
     },
+    "./markdown": {
+      "types": "./markdown.d.ts",
+      "default": "./markdown.mjs"
+    },
     "./list-registry": {
       "types": "./list-registry.d.ts",
       "default": "./list-registry.mjs"
@@ -45,6 +49,8 @@
     "list-reducer.d.ts",
     "board.mjs",
     "board.d.ts",
+    "markdown.mjs",
+    "markdown.d.ts",
     "list-registry.mjs",
     "list-registry.d.ts",
     "list-nav.mjs",

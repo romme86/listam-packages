@@ -1,11 +1,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseIntent, normalizeTranscript } from './voice-intent.mjs'
+import { parseIntent, normalizeTranscript, detectWake } from './voice-intent.mjs'
 
 test('normalizeTranscript folds accents, case, punctuation and whitespace', () => {
     assert.equal(normalizeTranscript('  Añade  PAN! '), 'anade pan')
     assert.equal(normalizeTranscript('Note: buy milk.'), 'note buy milk')
     assert.equal(normalizeTranscript(undefined), '')
+})
+
+test('detectWake: true only when a wake phrase leads the transcript', () => {
+    assert.equal(detectWake('yo add milk'), true)
+    assert.equal(detectWake('YO, add milk'), true)
+    assert.equal(detectWake('hey listam take a note'), true)
+    assert.equal(detectWake('dai dai dai dai add milk'), true)
+    // bare command, no wake word -> not addressed by the wake check
+    assert.equal(detectWake('add milk'), false)
+    // wake word mid-sentence does not count (must lead)
+    assert.equal(detectWake('please yo add milk'), false)
+    assert.equal(detectWake(''), false)
+    assert.equal(detectWake(undefined), false)
 })
 
 test('add_item with explicit list', () => {
@@ -68,6 +81,27 @@ test('leading wake words are stripped before parsing', () => {
     assert.equal(parseIntent('yo add eggs to fridge').slots.item, 'eggs')
     assert.equal(parseIntent('hey listam remove butter').intent, 'remove_item')
     assert.equal(parseIntent('dai dai dai dai add salt').slots.item, 'salt')
+})
+
+test('lenient: skips a non-wake filler / STT mishear before the verb', () => {
+    // "yup" is a common STT mishearing of the wake word "yo"; the verb is no
+    // longer at the start, but the command is still clear.
+    const r = parseIntent('yup add milk')
+    assert.equal(r.intent, 'add_item')
+    assert.equal(r.slots.item, 'milk')
+    assert.equal(r.slots.list, null)
+
+    const r2 = parseIntent('um, add bread to pantry')
+    assert.equal(r2.intent, 'add_item')
+    assert.equal(r2.slots.item, 'bread')
+    assert.equal(r2.slots.list, 'pantry')
+
+    assert.equal(parseIntent('so remove butter').intent, 'remove_item')
+})
+
+test('lenient pass does not invent commands from verbless chatter', () => {
+    assert.equal(parseIntent('the weather is nice today').intent, 'unknown')
+    assert.equal(parseIntent('i had a lovely breakfast').intent, 'unknown')
 })
 
 test('unknown input returns the unknown intent', () => {

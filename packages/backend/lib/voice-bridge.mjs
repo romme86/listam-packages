@@ -33,12 +33,15 @@ export function createUtteranceAssembler ({
 
     function reset () { active = false; wakeWordId = 0; startedAt = 0; chunks = []; bytes = 0 }
 
-    function finalize (reason) {
+    function finalize (reason, wake = null) {
         if (!active) return
         const pcm = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, bytes)
         const utterance = { pcm, sampleRate, wakeWordId, reason, bytes, durationMs: Math.round((bytes / BYTES_PER_SAMPLE / sampleRate) * 1000) }
+        // On-device wake label from the END frame (firmware ≥ the labeled build):
+        // lets the dataset writer tag positives ("yo" fired) vs hard-negatives.
+        if (wake) utterance.wake = wake
         reset()
-        log(`utterance ${utterance.bytes} bytes (~${utterance.durationMs} ms), reason=${reason}`)
+        log(`utterance ${utterance.bytes} bytes (~${utterance.durationMs} ms), reason=${reason}${wake ? `, wake=${wake.fired ? 'FIRED' : 'no'}@${wake.prob?.toFixed?.(3)}` : ''}`)
         try { onUtterance(utterance) } catch (err) { log(`onUtterance threw: ${err?.message || err}`) }
     }
 
@@ -63,7 +66,7 @@ export function createUtteranceAssembler ({
                 if (bytes >= maxBytes) finalize('max')
                 break
             case 'end':
-                finalize(typeof frame.reason === 'string' ? frame.reason : 'end')
+                finalize(typeof frame.reason === 'string' ? frame.reason : 'end', frame.wake ?? null)
                 break
             default:
                 break

@@ -47,8 +47,30 @@ function stripWakePrefix (text) {
     return text.replace(re, '').trim()
 }
 
+// True if the transcript opens with a recognized wake phrase. The host uses this
+// to light the leaf LED only when actually addressed ("yo …"), as opposed to
+// ambient sound that merely tripped the on-device loudness gate. `locale` is
+// accepted for symmetry with parseIntent; the wake set is currently global.
+export function detectWake (transcript, locale = 'en') {
+    const text = normalizeTranscript(transcript)
+    if (!text) return false
+    return new RegExp(`^(?:${alternation(WAKE_PHRASES)})\\b`, 'i').test(text)
+}
+
 function cleanSlot (s) {
     return (s || '').replace(/\s+/g, ' ').trim()
+}
+
+// Index of the first command-introducing token (note start / add or remove
+// verb) at a word boundary, or -1. The leaf's loudness gate folds the wake word
+// into every utterance, and STT routinely prepends filler or mis-hears the wake
+// ("yup add milk", "um, add milk") — pushing the verb off the start where the
+// anchored grammar can't see it. A lenient retry slices from here.
+function firstCommandIndex (text, g) {
+    const all = [...g.note.starts, ...g.add.verbs, ...g.remove.verbs]
+    const re = new RegExp(`\\b(?:${alternation(all)})\\b`, 'i')
+    const m = text.match(re)
+    return m ? m.index : -1
 }
 
 // A note can itself contain the words "add" or "remove", so it is checked
@@ -106,10 +128,16 @@ export function parseIntent (transcript, locale = 'en') {
     const g = grammarFor(locale)
     const text = stripWakePrefix(normalizeTranscript(transcript))
     if (!text) return { intent: 'unknown', slots: {}, confidence: 0, raw: text }
-    return (
-        tryNote(text, g) ||
-        tryAdd(text, g) ||
-        tryRemove(text, g) ||
-        { intent: 'unknown', slots: {}, confidence: 0, raw: text }
-    )
+    const anchored = tryNote(text, g) || tryAdd(text, g) || tryRemove(text, g)
+    if (anchored) return anchored
+    // Lenient retry: skip leading filler / wake-word mishear up to the first
+    // real command verb, then parse from there. Lower confidence since we had
+    // to discard a prefix the anchored grammar rejected.
+    const idx = firstCommandIndex(text, g)
+    if (idx > 0) {
+        const sliced = text.slice(idx)
+        const lenient = tryNote(sliced, g) || tryAdd(sliced, g) || tryRemove(sliced, g)
+        if (lenient) return { ...lenient, confidence: Math.min(lenient.confidence, 0.6), raw: text }
+    }
+    return { intent: 'unknown', slots: {}, confidence: 0, raw: text }
 }

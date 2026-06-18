@@ -5,10 +5,17 @@
 //
 // Wire frame (matches the leaf firmware, leaf-esp32/src/voice.rs):
 //   [u24le bodyLen][body...]   where body[0] = type, body[1..] = payload
+//   leaf -> host:
 //     0x00 HELLO  payload = utf8 leaf id
 //     0x01 START  payload = [u8 wakeWordId][u32le epochMs]
 //     0x02 CHUNK  payload = PCM16LE, 16 kHz mono
-//     0x03 END    payload = [u8 reason]  (0=silence, 1=max, 2=aborted)
+//     0x03 END    payload = [u8 reason] (0=silence,1=max,2=aborted), optionally
+//                 followed by the on-device wake label so utterances can be saved
+//                 to the training dataset auto-labeled positive/hard-negative:
+//                 [u8 fired][u16le probMilli (prob*1000)][u16le featPeak]
+//   host -> leaf (LED feedback, read by the leaf after it sends END):
+//     0x10 LED    payload = [u8 color]  (0=off,1=yellow,2=purple,3=green,4=red)
+//     0x11 DONE   payload = none        (host finished; leaf resets to idle)
 //
 // The injected `tcp` (Node `net` or `bare-tcp`) mirrors how leaf-bridge.mjs is
 // constructed, so this builds on both runtimes.
@@ -16,6 +23,10 @@
 import { createUtteranceAssembler } from './voice-bridge.mjs'
 
 export const FRAME = { HELLO: 0x00, START: 0x01, CHUNK: 0x02, END: 0x03 }
+// Host -> leaf response frames. The leaf mirrors LED onto its onboard RGB once it
+// has sent END, so the colors reflect host-side recognition, not the dB gate.
+export const RESP = { LED: 0x10, DONE: 0x11 }
+export const LED_COLOR = { off: 0, yellow: 1, purple: 2, green: 3, red: 4 }
 const END_REASON = { 0: 'silence', 1: 'max', 2: 'aborted' }
 const MAX_BODY = 1 << 24 // u24le ceiling; guards against a garbage length prefix
 
@@ -33,7 +44,18 @@ export function decodeBody (body) {
         case FRAME.HELLO: return { type: 'hello', leafId: body.slice(1).toString('utf8') }
         case FRAME.START: return { type: 'start', wakeWordId: body[1] ?? 0, epochMs: body.length >= 6 ? body.readUInt32LE(2) : 0 }
         case FRAME.CHUNK: return { type: 'chunk', pcm: body.slice(1) }
-        case FRAME.END: return { type: 'end', reason: END_REASON[body[1]] ?? 'end' }
+        case FRAME.END: {
+            const end = { type: 'end', reason: END_REASON[body[1]] ?? 'end' }
+            // Optional on-device wake label tail (older firmware sends reason only).
+            if (body.length >= 7) {
+                end.wake = {
+                    fired: body[2] === 1,
+                    prob: body.readUInt16LE(3) / 1000,
+                    featPeak: body.readUInt16LE(5),
+                }
+            }
+            return end
+        }
         default: return { type: 'unknown', raw: type }
     }
 }
@@ -59,6 +81,24 @@ export function createFrameParser () {
     }
 }
 
+// Per-connection LED feedback channel handed to onUtterance. Writes are
+// best-effort: a closed/broken socket silently drops feedback (the leaf has its
+// own read timeout). `led(name)` takes an LED_COLOR key; `done()` ends the run.
+export function makeReply (socket, log = () => {}) {
+    let open = true
+    const markClosed = () => { open = false }
+    socket.on?.('close', markClosed)
+    socket.on?.('error', markClosed)
+    const write = (buf) => {
+        if (!open) return
+        try { socket.write(buf) } catch (err) { log(`reply write failed: ${err?.message || err}`) }
+    }
+    return {
+        led: (name) => write(encodeFrame(RESP.LED, Buffer.from([LED_COLOR[name] ?? 0]))),
+        done: () => write(encodeFrame(RESP.DONE)),
+    }
+}
+
 // Start the TCP listener. `tcp` is an injected net-like module ({ createServer }).
 export async function startAudioBridge ({ tcp, port, host = '0.0.0.0', onUtterance, maxBytes, logger = null } = {}) {
     if (!tcp?.createServer) throw new Error('startAudioBridge requires an injected tcp with createServer')
@@ -68,8 +108,12 @@ export async function startAudioBridge ({ tcp, port, host = '0.0.0.0', onUtteran
 
     const server = tcp.createServer((socket) => {
         sockets.add(socket)
+        try { socket.setNoDelay?.(true) } catch {}
+        const reply = makeReply(socket, log)
         const parser = createFrameParser()
-        const assembler = createUtteranceAssembler({ onUtterance, maxBytes, logger })
+        // onUtterance gets the reply channel so it can light the leaf LED at each
+        // recognition milestone (wake word → command → saved).
+        const assembler = createUtteranceAssembler({ onUtterance: (u) => onUtterance(u, reply), maxBytes, logger })
         socket.on('data', (chunk) => { for (const f of parser.push(chunk)) assembler.onFrame(f) })
         socket.on('error', () => {})
         socket.on('close', () => { sockets.delete(socket) })

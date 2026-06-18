@@ -113,3 +113,19 @@ test('unknown intent returns unknownCommand', async () => {
     assert.equal(r.ok, false)
     assert.equal(r.code, 'unknownCommand')
 })
+
+// Contract / regression guard for the 2026-06-18 review finding: the controller
+// is the UNCONDITIONAL write boundary — it executes whatever intent it is handed,
+// including a low-confidence ambient parse, and handleRemove deletes by substring
+// match. So the false-positive gate MUST live upstream (voice-feedback's
+// shouldExecuteIntent), not here. This test pins that split: if it ever starts
+// failing because the controller began rejecting on confidence, the gating
+// responsibility moved and the feedback-layer gate may now be redundant/conflicting.
+test('controller executes a low-confidence ambient remove — gating is upstream, not here', async () => {
+    const { ctl, calls } = makeController({
+        getAllItems: async () => [{ id: 's1', listId: 'default', listType: 'shopping', text: 'shoes' }],
+    })
+    const r = await ctl.execute({ intent: 'remove_item', slots: { item: 'shoes' }, confidence: 0.6 })
+    assert.equal(r.ok, true, 'the controller does not consult confidence')
+    assert.deepEqual(calls.del.map((it) => it.id), ['s1'], 'a real item WAS deleted — the upstream gate must prevent this from being reached')
+})
