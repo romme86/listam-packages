@@ -80,7 +80,12 @@ export function createVoiceFeedbackHandler ({
             const { text, locale: detected } = await stt.transcribe({ ...utterance, locale })
             const lang = detected && detected !== 'auto' ? detected : (locale !== 'auto' ? locale : 'en')
             const intent = parseIntent(text, lang)
-            const wake = detectWake(text, lang)
+            // Trust the ON-DEVICE wake word (microWakeWord) when the firmware
+            // reports it fired: the STT often mis-transcribes the spoken "yo"
+            // (e.g. as the Italian "io"), so a text-only detectWake would wrongly
+            // gate a command the leaf already confirmed was addressed to it. Fall
+            // back to text detection for older firmware that sends no wake label.
+            const wake = utterance?.wake?.fired === true || detectWake(text, lang)
             // Addressed = a wake word led the utterance, or it parses to a command
             // (covers STT mis-hearing the wake word but still getting the verb).
             // This drives the LED/parse milestones only; it does NOT decide whether

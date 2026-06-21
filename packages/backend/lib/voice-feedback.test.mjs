@@ -65,6 +65,28 @@ test('command recognized but save fails -> yellow, purple, red', async () => {
     assert.equal(reply.dones, 1)
 })
 
+test('on-device wake (utterance.wake.fired) executes even when STT mis-hears "yo" as "io"', async () => {
+    // Real case: the leaf microWakeWord fires (0.996), but whisper transcribes
+    // the spoken "yo" as the Italian "io" -> text detectWake fails and the parse
+    // is only the 0.6 lenient retry. The firmware-reported wake must still let it
+    // through, or Italian voice adds silently gate.
+    const ctrl = recordingController()
+    const reply = recordingReply()
+    await handlerFor(sttFor('io aggiungi latte', 'it'), ctrl)({ wake: { fired: true, prob: 0.996 } }, reply)
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
+    assert.equal(ctrl.executed.length, 1)
+    assert.equal(ctrl.executed[0].intent, 'add_item')
+})
+
+test('WITHOUT on-device wake, the same mis-heard low-confidence add is still gated', async () => {
+    // The gate still protects ambient speech: no firmware wake + 0.6 < 0.75 floor.
+    const ctrl = recordingController()
+    const reply = recordingReply()
+    await handlerFor(sttFor('io aggiungi latte', 'it'), ctrl)({}, reply)
+    assert.equal(ctrl.executed.length, 0)
+    assert.equal(reply.leds.includes('green'), false)
+})
+
 test('STT unavailable -> dark, just done', async () => {
     const reply = recordingReply()
     const stt = { available: async () => false, transcribe: async () => { throw new Error('should not be called') } }
