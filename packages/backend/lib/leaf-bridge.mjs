@@ -32,6 +32,13 @@ async function resolveTcp(tcp) {
 export async function startLeafBridge({ port, host = '0.0.0.0', logger = console, tcp, onStatus } = {}) {
     if (!store) throw new Error('leaf-bridge: corestore not ready')
     const net = await resolveTcp(tcp)
+    // `process` is undefined in the Bare desktop worker (it only exists under
+    // Node, e.g. the headless host). Reading it inside the per-connection handler
+    // threw a ReferenceError that bare-tcp re-emitted as an unhandled 'error',
+    // aborting the whole backend whenever a leaf connected. Resolve the debug
+    // flag once from whichever env exists.
+    const env = globalThis.Bare?.env ?? globalThis.process?.env ?? {}
+    const debugBytes = !!env.LISTAM_LEAF_BRIDGE_DEBUG
     const control = store.get({ name: 'leaf-control' })
     await control.ready()
 
@@ -111,7 +118,7 @@ export async function startLeafBridge({ port, host = '0.0.0.0', logger = console
         // LISTAM_LEAF_BRIDGE_DEBUG=1: log per-chunk byte flow with timestamps,
         // to tell "leaf went silent" apart from "hub stopped answering" when
         // a leaf session wedges. Extra 'data' listeners do not disturb pipe().
-        if (process.env.LISTAM_LEAF_BRIDGE_DEBUG) {
+        if (debugBytes) {
             const t0 = Date.now()
             let inBytes = 0
             let outBytes = 0
