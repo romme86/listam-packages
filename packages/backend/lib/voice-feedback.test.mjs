@@ -44,10 +44,10 @@ test('anchored "add milk" without a wake word clears the floor (0.75) -> execute
     assert.equal(reply.dones, 1)
 })
 
-test('wake word only (no command) -> yellow then done, no purple/green', async () => {
+test('wake word only (no command) -> yellow then red (heard but not understood)', async () => {
     const reply = recordingReply()
     await handlerFor(sttFor('yo'))({}, reply)
-    assert.deepEqual(reply.leds, ['yellow'])
+    assert.deepEqual(reply.leds, ['yellow', 'red'])
     assert.equal(reply.dones, 1)
 })
 

@@ -33,6 +33,10 @@
       "types": "./list-nav.d.ts",
       "default": "./list-nav.mjs"
     },
+    "./labels": {
+      "types": "./labels.d.ts",
+      "default": "./labels.mjs"
+    },
     "./voice-grammar": {
       "default": "./voice-grammar.mjs"
     },
@@ -55,6 +59,8 @@
     "list-registry.d.ts",
     "list-nav.mjs",
     "list-nav.d.ts",
+    "labels.mjs",
+    "labels.d.ts",
     "voice-grammar.mjs",
     "voice-intent.mjs",
     "LICENSE"

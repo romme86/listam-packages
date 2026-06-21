@@ -94,7 +94,14 @@ export function createVoiceFeedbackHandler ({
             // 1) wake word recognized -> yellow
             reply?.led?.('yellow')
             if (intent.intent === 'unknown') {
+                // Addressed (the wake word fired) but the command was not
+                // understood — e.g. speaking a language the STT model can't
+                // transcribe (an English-only model hearing Italian). Flash red so
+                // the failure is legible ("heard you, didn't understand") instead
+                // of the leaf silently going dark after yellow.
                 log(`[voice] "${text}" -> wake only (no command)`)
+                await sleep(dwell.command)
+                reply?.led?.('red')
                 await sleep(dwell.fail)
                 reply?.done?.()
                 return
