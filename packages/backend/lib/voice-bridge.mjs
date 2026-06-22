@@ -11,6 +11,8 @@
 //   { type: 'chunk', pcm: Buffer }
 //   { type: 'end',   reason }
 
+import b4a from 'b4a'
+
 const SAMPLE_RATE = 16000
 const BYTES_PER_SAMPLE = 2 // PCM16
 // Hard cap so a noisy room / malicious leaf can't stream unbounded into memory.
@@ -35,7 +37,9 @@ export function createUtteranceAssembler ({
 
     function finalize (reason, wake = null) {
         if (!active) return
-        const pcm = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, bytes)
+        // b4a.concat (not Buffer.concat — absent under Bare). chunks already sum
+        // to `bytes`, so no explicit length arg is needed.
+        const pcm = chunks.length === 1 ? chunks[0] : b4a.concat(chunks)
         const utterance = { pcm, sampleRate, wakeWordId, reason, bytes, durationMs: Math.round((bytes / BYTES_PER_SAMPLE / sampleRate) * 1000) }
         // On-device wake label from the END frame (firmware ≥ the labeled build):
         // lets the dataset writer tag positives ("yo" fired) vs hard-negatives.

@@ -20,10 +20,17 @@ test('buildWhisperArgs includes the model + wav and respects locale', () => {
     const withLocale = buildWhisperArgs({ modelPath: '/m.bin', wavPath: '/a.wav', locale: 'it' })
     assert.ok(withLocale.includes('-m') && withLocale.includes('/m.bin'))
     assert.ok(withLocale.includes('-f') && withLocale.includes('/a.wav'))
+    // greedy/no-fallback decode flags are emitted before the -l tail
+    assert.ok(withLocale.includes('-bs') && withLocale.includes('-bo') && withLocale.includes('-nf'))
     assert.deepEqual(withLocale.slice(withLocale.indexOf('-l')), ['-l', 'it'])
 
     const auto = buildWhisperArgs({ modelPath: '/m.bin', wavPath: '/a.wav', locale: 'auto' })
     assert.ok(!auto.includes('-l')) // auto-detect => no -l flag
+
+    // threads is appended only when a positive integer is supplied
+    assert.ok(!withLocale.includes('-t'))
+    const withThreads = buildWhisperArgs({ modelPath: '/m.bin', wavPath: '/a.wav', locale: 'it', threads: 8 })
+    assert.deepEqual(withThreads.slice(withThreads.indexOf('-t'), withThreads.indexOf('-t') + 2), ['-t', '8'])
 })
 
 test('cleanWhisperOutput strips timestamp tags and collapses whitespace', () => {

@@ -22,6 +22,10 @@ const sleep = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.
 
 const DEFAULT_DWELL = { command: 350, hold: 550, fail: 450 }
 
+// Grammars tried when the spoken language is unknown ('auto'): the six UI
+// locales. Order is the tie-break preference when multiple would match.
+const AUTO_LANGS = ['en', 'it', 'es', 'de', 'fr', 'pt']
+
 // Write gate (NOT the LED): which parsed commands are allowed to actually execute
 // and save. There is no real wake-word model yet — the leaf only has a loudness
 // (dB) gate and sends wakeWordId=1 unconditionally (microWakeWord is deferred), so
@@ -78,14 +82,29 @@ export function createVoiceFeedbackHandler ({
                 return
             }
             const { text, locale: detected } = await stt.transcribe({ ...utterance, locale })
-            const lang = detected && detected !== 'auto' ? detected : (locale !== 'auto' ? locale : 'en')
-            const intent = parseIntent(text, lang)
+            // Resolve which grammar(s) to parse against. With a real detected or
+            // configured language, use just that. With 'auto' (whisper auto-detect,
+            // no language hint), try ALL supported grammars and keep the best parse
+            // — otherwise a non-English speaker's command parses under English and
+            // is never recognized (the "red light" bug).
+            const langs = detected && detected !== 'auto'
+                ? [detected]
+                : (locale && locale !== 'auto' ? [locale] : AUTO_LANGS)
+            let intent = { intent: 'unknown', slots: {}, confidence: 0, raw: text }
+            let lang = langs[0]
+            for (const candidate of langs) {
+                const parsed = parseIntent(text, candidate)
+                if (parsed.intent !== 'unknown' && Number(parsed.confidence) > Number(intent.confidence)) {
+                    intent = parsed
+                    lang = candidate
+                }
+            }
             // Trust the ON-DEVICE wake word (microWakeWord) when the firmware
             // reports it fired: the STT often mis-transcribes the spoken "yo"
             // (e.g. as the Italian "io"), so a text-only detectWake would wrongly
             // gate a command the leaf already confirmed was addressed to it. Fall
-            // back to text detection for older firmware that sends no wake label.
-            const wake = utterance?.wake?.fired === true || detectWake(text, lang)
+            // back to text detection (any candidate language) for older firmware.
+            const wake = utterance?.wake?.fired === true || langs.some((l) => detectWake(text, l))
             // Addressed = a wake word led the utterance, or it parses to a command
             // (covers STT mis-hearing the wake word but still getting the verb).
             // This drives the LED/parse milestones only; it does NOT decide whether
@@ -111,10 +130,12 @@ export function createVoiceFeedbackHandler ({
                 reply?.done?.()
                 return
             }
-            // 2) command recognized -> purple
-            await sleep(dwell.command)
+            // 2) command recognized -> purple. Shown even when the write is gated,
+            // so on-device debugging still proves the parse. No dwell sleep before
+            // the write: transcription already finished above, so any sleep here is
+            // pure latency between recognition and the item appearing. The leaf
+            // still receives yellow -> purple -> green/red in order.
             reply?.led?.('purple')
-            await sleep(dwell.command)
             // WRITE GATE: the milestones above show the parse, but a likely false
             // positive (no wake word + below-floor confidence, e.g. an ambient
             // "please put the kettle on" -> add 0.6, or "take off your shoes" ->
@@ -123,11 +144,13 @@ export function createVoiceFeedbackHandler ({
             // from silently mutating lists.
             if (!shouldExecuteIntent(intent, { wake, floors })) {
                 log(`[voice] "${text}" -> ${intent.intent} (conf ${intent.confidence}) gated: not addressed (no wake word, confidence below floor)`)
+                await sleep(dwell.command)
                 await sleep(dwell.fail)
                 reply?.done?.()
                 return
             }
-            // 3) execute and confirm the save -> green (red on failure)
+            // 3) execute FIRST so the item exists ~700ms sooner, THEN play the
+            // confirm color. The dwell now sleeps purely for visual sequencing.
             const result = await controller.execute(intent)
             log(`[voice] "${text}" -> ${result.intent} (${result.code})`)
             reply?.led?.(result.ok ? 'green' : 'red')

@@ -21,6 +21,16 @@
 // constructed, so this builds on both runtimes.
 
 import { createUtteranceAssembler } from './voice-bridge.mjs'
+import b4a from 'b4a'
+
+// The socket chunks are Node Buffers on the headless host but plain Uint8Array
+// under Bare (the desktop worker), which has NO Buffer.readUIntLE/writeUIntLE/
+// .copy/Buffer.concat. b4a + manual little-endian byte math work on BOTH, so the
+// same codec runs in both runtimes.
+const EMPTY = b4a.alloc(0)
+const readU16LE = (b, o) => b[o] | (b[o + 1] << 8)
+const readU24LE = (b, o) => b[o] | (b[o + 1] << 8) | (b[o + 2] << 16)
+const readU32LE = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16)) + b[o + 3] * 0x1000000
 
 export const FRAME = { HELLO: 0x00, START: 0x01, CHUNK: 0x02, END: 0x03 }
 // Host -> leaf response frames. The leaf mirrors LED onto its onboard RGB once it
@@ -30,28 +40,30 @@ export const LED_COLOR = { off: 0, yellow: 1, purple: 2, green: 3, red: 4 }
 const END_REASON = { 0: 'silence', 1: 'max', 2: 'aborted' }
 const MAX_BODY = 1 << 24 // u24le ceiling; guards against a garbage length prefix
 
-export function encodeFrame (type, payload = Buffer.alloc(0)) {
-    const body = Buffer.concat([Buffer.from([type]), payload])
-    const out = Buffer.alloc(3 + body.length)
-    out.writeUIntLE(body.length, 0, 3)
-    body.copy(out, 3)
+export function encodeFrame (type, payload = EMPTY) {
+    const body = b4a.concat([b4a.from([type]), payload])
+    const out = b4a.alloc(3 + body.length)
+    out[0] = body.length & 0xff
+    out[1] = (body.length >>> 8) & 0xff
+    out[2] = (body.length >>> 16) & 0xff
+    out.set(body, 3)
     return out
 }
 
 export function decodeBody (body) {
     const type = body[0]
     switch (type) {
-        case FRAME.HELLO: return { type: 'hello', leafId: body.slice(1).toString('utf8') }
-        case FRAME.START: return { type: 'start', wakeWordId: body[1] ?? 0, epochMs: body.length >= 6 ? body.readUInt32LE(2) : 0 }
-        case FRAME.CHUNK: return { type: 'chunk', pcm: body.slice(1) }
+        case FRAME.HELLO: return { type: 'hello', leafId: b4a.toString(body.subarray(1), 'utf8') }
+        case FRAME.START: return { type: 'start', wakeWordId: body[1] ?? 0, epochMs: body.length >= 6 ? readU32LE(body, 2) : 0 }
+        case FRAME.CHUNK: return { type: 'chunk', pcm: body.subarray(1) }
         case FRAME.END: {
             const end = { type: 'end', reason: END_REASON[body[1]] ?? 'end' }
             // Optional on-device wake label tail (older firmware sends reason only).
             if (body.length >= 7) {
                 end.wake = {
                     fired: body[2] === 1,
-                    prob: body.readUInt16LE(3) / 1000,
-                    featPeak: body.readUInt16LE(5),
+                    prob: readU16LE(body, 3) / 1000,
+                    featPeak: readU16LE(body, 5),
                 }
             }
             return end
@@ -63,21 +75,22 @@ export function decodeBody (body) {
 // Streaming length-prefixed frame parser. push() returns any complete decoded
 // frames; partial frames are buffered until the rest arrives.
 export function createFrameParser () {
-    let buf = Buffer.alloc(0)
+    let buf = EMPTY
     return {
         push (chunk) {
-            buf = buf.length ? Buffer.concat([buf, chunk]) : Buffer.from(chunk)
+            const c = b4a.from(chunk)
+            buf = buf.length ? b4a.concat([buf, c]) : c
             const frames = []
             while (buf.length >= 3) {
-                const bodyLen = buf.readUIntLE(0, 3)
-                if (bodyLen <= 0 || bodyLen > MAX_BODY) { buf = Buffer.alloc(0); break } // resync on garbage
+                const bodyLen = readU24LE(buf, 0)
+                if (bodyLen <= 0 || bodyLen > MAX_BODY) { buf = EMPTY; break } // resync on garbage
                 if (buf.length < 3 + bodyLen) break
-                frames.push(decodeBody(buf.slice(3, 3 + bodyLen)))
-                buf = buf.slice(3 + bodyLen)
+                frames.push(decodeBody(buf.subarray(3, 3 + bodyLen)))
+                buf = buf.subarray(3 + bodyLen)
             }
             return frames
         },
-        reset () { buf = Buffer.alloc(0) },
+        reset () { buf = EMPTY },
     }
 }
 
@@ -94,7 +107,7 @@ export function makeReply (socket, log = () => {}) {
         try { socket.write(buf) } catch (err) { log(`reply write failed: ${err?.message || err}`) }
     }
     return {
-        led: (name) => write(encodeFrame(RESP.LED, Buffer.from([LED_COLOR[name] ?? 0]))),
+        led: (name) => write(encodeFrame(RESP.LED, b4a.from([LED_COLOR[name] ?? 0]))),
         done: () => write(encodeFrame(RESP.DONE)),
     }
 }

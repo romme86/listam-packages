@@ -32,8 +32,19 @@ export function pcm16ToWav (pcm, sampleRate = 16000) {
 }
 
 // whisper-cli args: model, input wav, language, no-timestamps, no-progress. Pure.
-export function buildWhisperArgs ({ modelPath, wavPath, locale, extraArgs = [] }) {
-    const args = ['-m', modelPath, '-f', wavPath, '-nt', '-np']
+//
+// Decode is forced greedy and single-pass for low latency: short list-commands
+// ("aggiungi pane") do not need whisper-cli's default beam-5 + best-of-5 search
+// or its temperature-fallback re-decodes, which dominate per-utterance time.
+//   -bs 1  beam size 1 (greedy)   -bo 1  best-of 1   -nf  no temperature fallback
+// Accuracy is held by the initial --prompt vocabulary bias (extraArgs) and the
+// write-gate confidence floors; anything here is overridable via extraArgs, which
+// is concatenated LAST so a user-supplied flag wins. `threads` is computed by the
+// caller (Node reads node:os; the Bare path has none) and only appended when set,
+// so this stays a pure, runtime-agnostic, Bare-safe function.
+export function buildWhisperArgs ({ modelPath, wavPath, locale, threads, extraArgs = [] }) {
+    const args = ['-m', modelPath, '-f', wavPath, '-nt', '-np', '-bs', '1', '-bo', '1', '-nf']
+    if (Number.isInteger(threads) && threads > 0) args.push('-t', String(threads))
     if (locale && locale !== 'auto') args.push('-l', locale)
     return args.concat(extraArgs)
 }
@@ -77,7 +88,12 @@ export function createWhisperCppStt ({ config = {}, logger = null } = {}) {
         const wavPath = path.join(os.tmpdir(), `listam-voice-${process.pid}-${Date.now()}.wav`)
         await fs.writeFile(wavPath, pcm16ToWav(pcm, sampleRate))
         try {
-            const args = buildWhisperArgs({ modelPath, wavPath, locale, extraArgs })
+            // Cap at 8 to keep work on performance cores (more threads onto E-cores
+            // can regress). Overridable via config.threads.
+            const threads = Number(config.threads) > 0
+                ? Number(config.threads)
+                : Math.min(8, os.availableParallelism?.() || os.cpus?.().length || 4)
+            const args = buildWhisperArgs({ modelPath, wavPath, locale, threads, extraArgs })
             const text = await new Promise((resolve, reject) => {
                 const child = cp.execFile(binPath, args, { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
                     if (err) return reject(err)
