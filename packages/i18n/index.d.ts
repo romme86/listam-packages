@@ -69,6 +69,8 @@ export type MessageKey =
     | 'main.grid.accessibilityHint'
     | 'main.drag.title'
     | 'main.drag.moved'
+    | 'main.drag.toTop'
+    | 'main.drag.toBottom'
     | 'main.notification.duplicateEdit'
     | 'main.notification.duplicateAdd'
     | 'main.notification.boardAddSoon'

@@ -172,6 +172,8 @@ export const FR_MESSAGES = {
     'main.grid.accessibilityHint': 'Touchez deux fois pour basculer l\'état fait. Appui long pour retirer.',
     'main.drag.title': 'Déposez dans une catégorie',
     'main.drag.moved': '« {item} » déplacé vers {category}',
+    'main.drag.toTop': 'Déplacer en haut',
+    'main.drag.toBottom': 'Déplacer en bas',
     'main.notification.duplicateEdit': 'Un article portant ce nom existe déjà',
     'main.notification.duplicateAdd': 'Cet article est déjà sur la liste',
     'main.notification.boardAddSoon': 'L\'ajout de cartes aux tableaux arrive bientôt',

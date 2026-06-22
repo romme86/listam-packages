@@ -172,6 +172,8 @@ export const DE_MESSAGES = {
     'main.grid.accessibilityHint': 'Doppeltippen, um Erledigt umzuschalten. Gedrückt halten zum Entfernen.',
     'main.drag.title': 'In eine Kategorie ziehen',
     'main.drag.moved': '"{item}" nach {category} verschoben',
+    'main.drag.toTop': 'Nach oben',
+    'main.drag.toBottom': 'Nach unten',
     'main.notification.duplicateEdit': 'Ein Artikel mit diesem Namen existiert bereits',
     'main.notification.duplicateAdd': 'Dieser Artikel ist bereits auf der Liste',
     'main.notification.boardAddSoon': 'Das Hinzufügen von Karten zu Boards kommt bald',

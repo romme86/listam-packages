@@ -172,6 +172,8 @@ export const IT_MESSAGES = {
     'main.grid.accessibilityHint': 'Tocca due volte per alternare lo stato. Tieni premuto per rimuovere.',
     'main.drag.title': 'Rilascia in una categoria',
     'main.drag.moved': 'Spostato "{item}" in {category}',
+    'main.drag.toTop': 'Sposta in alto',
+    'main.drag.toBottom': 'Sposta in basso',
     'main.notification.duplicateEdit': 'Esiste già un articolo con questo nome',
     'main.notification.duplicateAdd': 'Quell\'articolo è già nella lista',
     'main.notification.boardAddSoon': 'L\'aggiunta di schede alle bacheche arriverà presto',

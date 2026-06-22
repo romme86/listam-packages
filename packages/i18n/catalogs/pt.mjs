@@ -172,6 +172,8 @@ export const PT_MESSAGES = {
     'main.grid.accessibilityHint': 'Toque duas vezes para alternar concluído. Mantenha premido para remover.',
     'main.drag.title': 'Largue numa categoria',
     'main.drag.moved': '"{item}" movido para {category}',
+    'main.drag.toTop': 'Mover para o topo',
+    'main.drag.toBottom': 'Mover para o fim',
     'main.notification.duplicateEdit': 'Já existe um artigo com esse nome',
     'main.notification.duplicateAdd': 'Esse artigo já está na lista',
     'main.notification.boardAddSoon': 'Adicionar cartões a quadros chega em breve',

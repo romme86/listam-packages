@@ -172,6 +172,8 @@ export const EN_MESSAGES = {
     'main.grid.accessibilityHint': 'Double tap to toggle done. Long-press to remove.',
     'main.drag.title': 'Drop into a category',
     'main.drag.moved': 'Moved "{item}" to {category}',
+    'main.drag.toTop': 'Move to top',
+    'main.drag.toBottom': 'Move to bottom',
     'main.notification.duplicateEdit': 'An item with that name already exists',
     'main.notification.duplicateAdd': 'That item is already on the list',
     'main.notification.boardAddSoon': 'Adding cards to boards is coming soon',

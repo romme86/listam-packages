@@ -172,6 +172,8 @@ export const ES_MESSAGES = {
     'main.grid.accessibilityHint': 'Toca dos veces para alternar hecho. Mantener pulsado para quitar.',
     'main.drag.title': 'Suelta en una categoria',
     'main.drag.moved': 'Se movio "{item}" a {category}',
+    'main.drag.toTop': 'Mover arriba',
+    'main.drag.toBottom': 'Mover abajo',
     'main.notification.duplicateEdit': 'Ya existe un articulo con ese nombre',
     'main.notification.duplicateAdd': 'Ese articulo ya esta en la lista',
     'main.notification.boardAddSoon': 'Anadir tarjetas a tableros estara disponible pronto',
