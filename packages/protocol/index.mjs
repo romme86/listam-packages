@@ -43,3 +43,13 @@ export const RPC_IMPORT = 26
 // leaf's provisioning GATT service (see @listam/provisioning). Reply over
 // RPC_MESSAGE as { type: 'leaf-provision-info', controlKey, hubAddr, audioAddr }.
 export const RPC_LEAF_PROVISION_INFO = 27
+// Move a single item to a different list and/or type WITHIN the same project.
+// The backend decomposes the move into ordinary add/delete (or, when the source
+// and destination share a listId, a single in-place update) so apply() and old
+// peers need no new operation type. Payload:
+//   { item, targetListId, targetListType?, fields? }
+// `fields` carries form-collected board ticket fields (description, checklist,
+// estimatedHours, estimatedComplexity, …) when promoting an item into a board.
+// Replies with the mutation result; a rigor-gate failure additionally pushes
+// RPC_MESSAGE { type: 'move-rigor-missing', missing } so nothing is deleted.
+export const RPC_MOVE = 28

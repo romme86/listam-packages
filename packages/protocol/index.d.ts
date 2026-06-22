@@ -26,3 +26,4 @@ export const RPC_EXPORT_DATA: 24
 export const RPC_EXPORT_SEED: 25
 export const RPC_IMPORT: 26
 export const RPC_LEAF_PROVISION_INFO: 27
+export const RPC_MOVE: 28

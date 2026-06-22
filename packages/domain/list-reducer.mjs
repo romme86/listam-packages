@@ -7,6 +7,7 @@ import {
     normalizeItemId,
     isStaleUpdate,
 } from './identity.mjs'
+import { sortByOrder } from './ordering.mjs'
 
 export { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, legacyItemId }
 
@@ -37,6 +38,7 @@ export function normalizeListItem(item, options = {}) {
     }
 
     if (typeof item.timestamp !== 'number') delete normalized.timestamp
+    if (!Number.isFinite(normalized.order)) delete normalized.order
     return normalized
 }
 
@@ -324,7 +326,11 @@ function removeItem(list, item) {
 function getListItems(byList, listId) {
     const list = byList.get(normalizeListId(listId))
     if (!list) return []
-    return list.order
-        .map((id) => list.items.get(id))
-        .filter(Boolean)
+    // list.order is insertion order; sortByOrder layers an explicit user-chosen
+    // `order` on top of it (items without one keep their insertion position).
+    return sortByOrder(
+        list.order
+            .map((id) => list.items.get(id))
+            .filter(Boolean),
+    )
 }

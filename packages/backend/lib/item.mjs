@@ -13,7 +13,8 @@ import {
     normalizeListItem,
 } from './list-reducer.mjs'
 import { createViewCheckpoint } from './view-checkpoint.mjs'
-import { isBoardType, applyStatusTransition, doneStatusesOf } from './board.mjs'
+import { isBoardType, applyStatusTransition, doneStatusesOf, validateTicketDraft } from './board.mjs'
+import { buildMovedItem, isSameSurfaceMove } from './list-move.mjs'
 
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
 let _writeChain = Promise.resolve()
@@ -272,6 +273,100 @@ export async function deleteItem (item) {
         // }
 
         logger.log('[INFO] Deleted item')
+        return true
+    })
+}
+
+// Move a single item to a different list and/or type WITHIN this project.
+//
+// The reducer buckets by listId and keys by id, so a bare listId rewrite would
+// leave the source copy behind (a duplicate). We therefore decompose the move:
+//   - same listId (only the type changes, e.g. built-in Groceries -> Board, both
+//     on 'default'): a single in-place update that flips listType, so the item
+//     simply changes which surface renders it;
+//   - different listId: add the destination (id preserved) then delete the
+//     source, both inside one enqueueWrite so they are atomic w.r.t. epoch
+//     rotation. Add-before-delete means a mid-failure leaves a recoverable
+//     duplicate rather than losing the item.
+// Both forms are ordinary add/update/delete ops, so apply() and old peers need
+// no new operation type.
+export async function moveItem (payload) {
+    if (!autobase) {
+        logger.log('[WARNING] moveItem called before Autobase is initialized')
+        return false
+    }
+
+    if (!autobase.writable) {
+        logger.log('[WARNING] moveItem called but autobase is not writable yet')
+        try {
+            const req = rpc.request(RPC_MESSAGE)
+            req.send(JSON.stringify({ type: 'not-writable', message: 'Waiting to be added as a writer by the host...' }))
+        } catch (e) {
+            logger.log('[ERROR] Failed to send not-writable message:', e)
+        }
+        return false
+    }
+
+    const source = payload?.item
+    if (!source || typeof source !== 'object' || !source.id) {
+        logger.log('[WARNING] moveItem called without a valid source item')
+        return false
+    }
+
+    logger.log('[INFO] Command RPC_MOVE moveItem')
+
+    const now = Date.now()
+    const dest = buildMovedItem(source, payload?.targetListId, payload?.targetListType, {
+        fields: payload?.fields ?? null,
+        now,
+        writerKey: localWriterKeyHex(),
+    })
+
+    // Rigor pre-check. apply() SILENTLY DROPS a board add that fails the rigor
+    // gate; for a cross-list promote that would delete the source but never
+    // create the destination -> data loss. The same-listId promote goes through
+    // the update branch which has no apply()-side gate, so this is the only
+    // enforcement there. Refuse the whole move up front and tell the frontend so
+    // it can collect the required ticket fields.
+    if (isBoardType(dest.listType) && boardConfigState?.config?.rigorOn) {
+        const check = validateTicketDraft(dest, boardConfigState.config)
+        if (!check || !check.ok) {
+            logger.log('[WARNING] MOVE refused; destination board rigor gate unmet; missing:', check?.missing)
+            try {
+                const req = rpc.request(RPC_MESSAGE)
+                req.send(JSON.stringify({ type: 'move-rigor-missing', missing: check?.missing ?? [], item: source }))
+            } catch (e) {
+                logger.log('[ERROR] Failed to send move-rigor-missing message:', e)
+            }
+            return false
+        }
+    }
+
+    const sameBucket = isSameSurfaceMove(source, payload?.targetListId)
+    const updateOp = sameBucket ? createListOperation('update', dest) : null
+    const addOp = sameBucket ? null : createListOperation('add', dest, { listId: dest.listId, listType: dest.listType })
+    const deleteOp = sameBucket ? null : createListOperation('delete', source)
+    if (sameBucket ? !updateOp : (!addOp || !deleteOp)) {
+        logger.log('[WARNING] moveItem could not build a valid operation')
+        return false
+    }
+
+    return enqueueWrite(async () => {
+        if (!autobase) return false
+        if (autobase.closing) {
+            logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
+            return false
+        }
+        if (!(await waitForFlushableWriter())) return refuseStalledMutation('MOVE')
+
+        if (sameBucket) {
+            await autobase.append(prepareListAppendOperation(updateOp))
+        } else {
+            await autobase.append(prepareListAppendOperation(addOp))
+            await autobase.append(prepareListAppendOperation(deleteOp))
+        }
+
+        logger.log('[INFO] Moved item', { id: dest.id, from: source.listId, to: dest.listId, sameBucket })
         return true
     })
 }

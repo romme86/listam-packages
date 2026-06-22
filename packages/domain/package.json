@@ -17,6 +17,10 @@
       "types": "./list-reducer.d.ts",
       "default": "./list-reducer.mjs"
     },
+    "./ordering": {
+      "types": "./ordering.d.ts",
+      "default": "./ordering.mjs"
+    },
     "./board": {
       "types": "./board.d.ts",
       "default": "./board.mjs"
@@ -37,6 +41,10 @@
       "types": "./labels.d.ts",
       "default": "./labels.mjs"
     },
+    "./list-move": {
+      "types": "./list-move.d.ts",
+      "default": "./list-move.mjs"
+    },
     "./voice-grammar": {
       "default": "./voice-grammar.mjs"
     },
@@ -51,6 +59,8 @@
     "identity.d.ts",
     "list-reducer.mjs",
     "list-reducer.d.ts",
+    "ordering.mjs",
+    "ordering.d.ts",
     "board.mjs",
     "board.d.ts",
     "markdown.mjs",
@@ -61,6 +71,8 @@
     "list-nav.d.ts",
     "labels.mjs",
     "labels.d.ts",
+    "list-move.mjs",
+    "list-move.d.ts",
     "voice-grammar.mjs",
     "voice-intent.mjs",
     "LICENSE"

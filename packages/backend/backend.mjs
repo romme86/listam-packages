@@ -23,10 +23,11 @@ import {
     RPC_GET_BOARD_CONFIG,
     RPC_EXPORT_DATA,
     RPC_EXPORT_SEED,
-    RPC_IMPORT
+    RPC_IMPORT,
+    RPC_MOVE
 } from '@listam/protocol'
 import b4a from 'b4a'
-import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, rebuildExtraListItems, projectItemsToFrontend} from './lib/item.mjs'
+import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, projectItemsToFrontend} from './lib/item.mjs'
 import {
     applyOperationToList,
     createListViewEntry,
@@ -290,6 +291,11 @@ async function handleFrontendRequest(req, error) {
             case RPC_DELETE: {
                 const data = JSON.parse(req.data.toString())
                 replyMutationResult(req, await deleteItem(data.item))
+                break
+            }
+            case RPC_MOVE: {
+                const data = JSON.parse(req.data.toString())
+                replyMutationResult(req, await moveItem(data))
                 break
             }
             case RPC_GET_KEY: {

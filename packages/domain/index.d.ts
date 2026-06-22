@@ -1,5 +1,6 @@
 export * from './identity'
 export * from './list-reducer'
+export * from './ordering'
 export * from './board'
 export * from './list-registry'
 export * from './list-nav'
