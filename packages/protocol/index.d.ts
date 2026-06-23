@@ -27,3 +27,6 @@ export const RPC_EXPORT_SEED: 25
 export const RPC_IMPORT: 26
 export const RPC_LEAF_PROVISION_INFO: 27
 export const RPC_MOVE: 28
+export const RPC_LIST_BACKUPS: 29
+export const RPC_RESTORE_BACKUP: 30
+export const RPC_SET_BACKUP_PASSWORD: 31

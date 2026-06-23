@@ -53,3 +53,12 @@ export const RPC_LEAF_PROVISION_INFO = 27
 // Replies with the mutation result; a rigor-gate failure additionally pushes
 // RPC_MESSAGE { type: 'move-rigor-missing', missing } so nothing is deleted.
 export const RPC_MOVE = 28
+// Automatic pre-join backups (device-key + required user password). All three
+// are request/response. LIST replies { ok, backups: [{ file, createdAt }],
+// passwordSet }. RESTORE { file, password } decrypts a saved auto-backup and
+// merges it (LWW). SET_BACKUP_PASSWORD { current?, next } stores/changes the
+// password (stored encrypted under the device key so join-time backups run
+// unattended).
+export const RPC_LIST_BACKUPS = 29
+export const RPC_RESTORE_BACKUP = 30
+export const RPC_SET_BACKUP_PASSWORD = 31

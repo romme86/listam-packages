@@ -24,7 +24,10 @@ import {
     RPC_EXPORT_DATA,
     RPC_EXPORT_SEED,
     RPC_IMPORT,
-    RPC_MOVE
+    RPC_MOVE,
+    RPC_LIST_BACKUPS,
+    RPC_RESTORE_BACKUP,
+    RPC_SET_BACKUP_PASSWORD
 } from '@listam/protocol'
 import b4a from 'b4a'
 import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, projectItemsToFrontend} from './lib/item.mjs'
@@ -39,6 +42,7 @@ import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
 import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.mjs'
+import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet } from './lib/auto-backup.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
@@ -440,6 +444,36 @@ async function handleFrontendRequest(req, error) {
                         notifyFrontend({ type: 'import-board-config-skipped' })
                     }
                     return { ok: true, ...result }
+                })
+                break
+            }
+            case RPC_LIST_BACKUPS: {
+                logger.log('[INFO] Command RPC_LIST_BACKUPS')
+                await replyBackupResult(req, async () => ({
+                    ok: true,
+                    backups: listAutoBackups(),
+                    passwordSet: isBackupPasswordSet(),
+                }))
+                break
+            }
+            case RPC_RESTORE_BACKUP: {
+                logger.log('[INFO] Command RPC_RESTORE_BACKUP')
+                const data = parseRpcJson(req.data)
+                await replyBackupResult(req, async () => {
+                    const result = await restoreAutoBackup(data?.file, data?.password)
+                    if (result.kind === 'data' && result.applied?.boardConfigSkipped) {
+                        notifyFrontend({ type: 'import-board-config-skipped' })
+                    }
+                    return { ok: true, ...result }
+                })
+                break
+            }
+            case RPC_SET_BACKUP_PASSWORD: {
+                logger.log('[INFO] Command RPC_SET_BACKUP_PASSWORD')
+                const data = parseRpcJson(req.data)
+                await replyBackupResult(req, async () => {
+                    await setBackupPassword({ current: data?.current, next: data?.next })
+                    return { ok: true }
                 })
                 break
             }

@@ -7,6 +7,7 @@ import { deleteBackendSecret, secretFingerprint } from "./secrets.mjs"
 import { describeCorruption, isCorruptionSignature, planRecoveryAction, quarantineStorageRoot } from "./recovery.mjs"
 import { INVITE_MAX_USES, isInviteUsable, reserveInviteUse, withInvitePolicy } from "./invite-policy.mjs"
 import { createJoinRollbackSnapshot, restoreJoinRollbackSnapshot } from "./join-rollback.mjs"
+import { createAutoBackup } from "./auto-backup.mjs"
 import { performMemberRemovalRekey } from "./rekey.mjs"
 import {
     buildMembershipRoster,
@@ -909,6 +910,13 @@ export async function joinViaInvite(z32InviteStr) {
                 await lc.setUserData(LOCAL_WRITER_SCOPE_USERDATA, b4a.from(joinedWriter.scopeName))
                 await lc.close()
             }
+
+            // Durable pre-join backup of the CURRENT lists, taken while the old
+            // base is still intact (just before initAutobase replaces it).
+            // Best-effort and no-throw: it must never abort the join. Skips
+            // silently if the user hasn't set a backup password yet (the join is
+            // gated on that in the UI, so normally one exists here).
+            await createAutoBackup({ reason: 'pre-join' })
 
             // 3. Use initAutobase to set up the joined base — same proven code
             //    path the host uses. Set encryption key first so initAutobase
