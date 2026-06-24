@@ -26,6 +26,10 @@ export function createBaseContext ({ role = 'shared', baseId = null, baseKey = n
         setCurrentList (v) { this.currentList = v },
         setEpochKey (v) { this.epochKey = v },
         applyMembershipCheckpoint: createViewCheckpoint(),
+        // Autobase does NOT re-run apply over history on reopen, so a shared
+        // base's currentList must be rebuilt from the persisted view on open —
+        // its own checkpoint (mirrors item.mjs's module-level one for personal).
+        viewCheckpoint: createViewCheckpoint(),
 
         // Core P2P instances (per base)
         autobase: null,
@@ -57,6 +61,7 @@ export function createBaseContext ({ role = 'shared', baseId = null, baseKey = n
         pairing: null,
         pairingMember: null,
         currentInvite: null,
+        inviteUsesRemaining: 0,
 
         // In-memory data (per base)
         currentList: [],

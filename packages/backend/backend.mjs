@@ -27,7 +27,9 @@ import {
     RPC_MOVE,
     RPC_LIST_BACKUPS,
     RPC_RESTORE_BACKUP,
-    RPC_SET_BACKUP_PASSWORD
+    RPC_SET_BACKUP_PASSWORD,
+    RPC_SHARE_LIST,
+    RPC_JOIN_LIST
 } from '@listam/protocol'
 import b4a from 'b4a'
 import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain} from './lib/item.mjs'
@@ -50,8 +52,8 @@ import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/bo
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
-import { openSharedBase, closeSharedBase } from './lib/shared-base.mjs'
-import { reduceRegistry, isRegistryItem, REG_KIND_LIST } from './lib/list-registry.mjs'
+import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView } from './lib/shared-base.mjs'
+import { reduceRegistry, isRegistryItem, REG_KIND_LIST, buildListMetaItem } from './lib/list-registry.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
 import {
@@ -79,7 +81,7 @@ import {
     setEpochEncryptionKeyPair
 } from "./lib/state.mjs"
 import { logger } from './lib/logger.mjs'
-import { setBackendFs } from './lib/platform-fs.mjs'
+import { setBackendFs, getBackendFs } from './lib/platform-fs.mjs'
 
 export let storagePath = './data'
 export let peerKeysString = ''
@@ -351,6 +353,27 @@ async function handleFrontendRequest(req, error) {
                     break
                 }
                 replyMutationResult(req, await moveItem(data, route))
+                break
+            }
+            case RPC_SHARE_LIST: {
+                logger.log('[INFO] Command RPC_SHARE_LIST')
+                const data = parseRpcJson(req.data) || {}
+                const result = await shareList(data.listId)
+                if (typeof req?.reply === 'function') {
+                    try { req.reply(JSON.stringify(result)) } catch (e) { logger.log('[ERROR] reply share-list:', e) }
+                }
+                // Also surface over RPC_MESSAGE for transports that don't read replies.
+                notifyFrontend({ type: 'share-list-result', listId: data.listId, ...result })
+                break
+            }
+            case RPC_JOIN_LIST: {
+                logger.log('[INFO] Command RPC_JOIN_LIST')
+                const data = parseRpcJson(req.data) || {}
+                const result = await joinList(data.invite)
+                if (typeof req?.reply === 'function') {
+                    try { req.reply(JSON.stringify(result)) } catch (e) { logger.log('[ERROR] reply join-list:', e) }
+                }
+                notifyFrontend({ type: 'join-list-result', ...result })
                 break
             }
             case RPC_GET_KEY: {
@@ -786,8 +809,8 @@ function pushFromBackend (ctx, command, item) {
 
 // ---- Single-list sharing: shared-base manager + registry-driven reconcile ----
 
-function sharedStorageDir (baseKeyHex) {
-    return `${storagePath}/shared/${baseKeyHex}`
+function sharedStorageDir (dirName) {
+    return `${storagePath}/shared/${dirName}`
 }
 
 // Push a shared base's already-materialized items to the frontend, each tagged
@@ -808,22 +831,16 @@ function projectSharedListToFrontend (ctx) {
     }
 }
 
-// Open a shared base into a fresh context and surface its current list. Returns
-// the context the manager tracks, or null on failure (reconcile then skips it).
+// reconcile() asks the manager to open a shared base referenced by the personal
+// registry that is not already open. Within a session, shareList/joinList
+// register their ctx directly (so this is a no-op for them). The remaining
+// callers are COLD BOOT and a paired device's AUTO-JOIN — both need per-base
+// secret persistence (epoch/owner keys) and, for auto-join, credential
+// propagation, which are not wired yet. Skipping keeps the base from opening in
+// an undecryptable state; cross-restart reopen + auto-join is the next step.
 async function openSharedForManager (baseKeyHex) {
-    try {
-        const ctx = createBaseContext({ role: 'shared', baseId: baseKeyHex, baseKey: b4a.from(baseKeyHex, 'hex') })
-        await openSharedBase(ctx, {
-            baseKey: ctx.baseKey,
-            storageDir: sharedStorageDir(baseKeyHex),
-            bootstrap: swarmBootstrap,
-        })
-        projectSharedListToFrontend(ctx)
-        return ctx
-    } catch (e) {
-        logger.log('[ERROR] Failed to open shared base:', baseKeyHex?.slice?.(0, 16), e)
-        return null
-    }
+    logger.log('[INFO] Shared base referenced by registry is not open locally; cross-restart reopen / auto-join not wired yet — skipping', baseKeyHex?.slice?.(0, 16))
+    return null
 }
 
 async function closeSharedForManager (_baseKeyHex, ctx) {
@@ -918,6 +935,144 @@ function resolveWriteContext (payload) {
     if (!key) return null
     const ctx = baseManager ? baseManager.get(key) : null
     return ctx || WRITE_REFUSED
+}
+
+// Promote a personal list into its OWN shared base and mint a co-edit invite.
+// Items are re-seeded into the new base (identity preserved), the personal
+// copies are tombstoned, and the personal registry entry is pointed at the new
+// base (regBaseKey) so this device — and the UI — route the list there.
+async function shareList (listId) {
+    if (!baseManager) return { ok: false, reason: 'not-ready' }
+    if (!autobase || !autobase.writable) return { ok: false, reason: 'not-writable' }
+    if (typeof listId !== 'string' || !listId) return { ok: false, reason: 'bad-list' }
+
+    // Already shared → return a fresh invite from the open base.
+    if (_listIdToBaseKey.has(listId)) {
+        const existing = baseManager.get(_listIdToBaseKey.get(listId))
+        if (existing) return { ok: true, invite: createSharedInvite(existing), baseKey: existing.baseId }
+    }
+
+    const all = await rebuildAllItems()
+    const items = all.filter((i) => i && i.listId === listId && !isRegistryItem(i))
+    const meta = all.find((i) => isRegistryItem(i) && i.regKind === REG_KIND_LIST && i.id === listId)
+    if (items.length === 0 && !meta) return { ok: false, reason: 'empty-list' }
+
+    const listType = meta?.regType || items[0]?.listType || 'shopping'
+    const name = meta?.regName || (typeof meta?.text === 'string' && meta.text) || listId
+    const groupId = meta?.regGroupId ?? null
+    const order = typeof meta?.regOrder === 'number' ? meta.regOrder : 0
+    const view = meta?.regView
+
+    const ctx = createBaseContext({ role: 'shared' })
+    const dirName = `owned-${Math.random().toString(36).slice(2, 12)}`
+    let baseKeyHex = null
+    // Up to (and including) the personal-registry write everything is reversible:
+    // a failure rolls back WITHOUT having tombstoned the personal copies, so no
+    // data can be lost. Past that point the share is committed.
+    try {
+        await openSharedBase(ctx, { baseKey: null, storageDir: sharedStorageDir(dirName), bootstrap: swarmBootstrap })
+        await bootstrapSharedOwner(ctx)
+        setupSharedPairing(ctx)
+        baseKeyHex = ctx.baseId
+
+        // Seed the list's items (identity preserved) PLUS a self-describing
+        // registry meta-item, so a joiner learns the canonical listId even for
+        // an empty list (and never has to guess one — see joinList).
+        await seedSharedBase(ctx, [
+            ...items,
+            buildListMetaItem({ id: listId, name, type: listType, groupId, order, view, updatedAt: Date.now() }),
+        ])
+
+        baseManager.register(baseKeyHex, ctx)
+        _listIdToBaseKey.set(listId, baseKeyHex)
+
+        // Point the personal registry at the shared base BEFORE tombstoning, and
+        // confirm it landed — otherwise a missing regBaseKey would, after a
+        // restart, route this list's writes back into the personal base.
+        const regOk = await updateItem(buildListMetaItem({ id: listId, name, type: listType, groupId, order, view, baseKey: baseKeyHex, updatedAt: Date.now() }))
+        if (!regOk) throw new Error('personal registry update refused')
+    } catch (e) {
+        logger.log('[ERROR] shareList failed before commit; rolling back:', e)
+        if (baseKeyHex) { _listIdToBaseKey.delete(listId); baseManager.remove(baseKeyHex) }
+        try { clearWriteChain(ctx) } catch (_) {}
+        try { await closeSharedBase(ctx) } catch (_) {}
+        return { ok: false, reason: 'share-failed' }
+    }
+
+    // Committed: the registry now points at the shared base. Tombstone the
+    // personal copies (best-effort) and mint the invite.
+    for (const item of items) {
+        try { await deleteItem(item) } catch (e) { logger.log('[ERROR] share-list tombstone:', e) }
+    }
+    projectSharedListToFrontend(ctx)
+    const invite = createSharedInvite(ctx) || null
+    logger.log('[INFO] Shared list promoted to its own base', { listId, baseKey: baseKeyHex.slice(0, 16), invite: !!invite })
+    return { ok: true, invite, baseKey: baseKeyHex }
+}
+
+// Additively join a shared list's base via its invite (NOT the destructive
+// whole-project join). Adds a personal registry entry pointing at the joined
+// base so it appears in the nav and routes writes there.
+async function joinList (invite) {
+    if (!baseManager) return { ok: false, reason: 'not-ready' }
+    if (typeof invite !== 'string' || !invite) return { ok: false, reason: 'bad-invite' }
+    const dirName = sharedDirNameForInvite(invite)
+    if (!dirName) return { ok: false, reason: 'bad-invite' }
+    let ctx = null
+    let baseKeyHex = null
+    try {
+        const joined = await joinSharedBaseViaInvite(createBaseContext, {
+            invite,
+            storageDir: sharedStorageDir(dirName),
+            bootstrap: swarmBootstrap,
+        })
+        ctx = joined.ctx
+        baseKeyHex = joined.baseKeyHex
+        const writable = joined.writable
+        baseManager.register(baseKeyHex, ctx)
+
+        // Adopt the shared list's CANONICAL id from the base's own self-describing
+        // registry meta-item (or, fallback, a replicated item). Never invent a
+        // synthetic id — one that didn't match the real listId would, once the
+        // real items arrived, route their writes to the personal base. Fail the
+        // join if nothing has described the list within the window.
+        let identity = null
+        const deadline = Date.now() + 15000
+        while (!identity && Date.now() < deadline) {
+            try { await ctx.autobase.update() } catch (_) {}
+            identity = await sharedListIdentity(ctx)
+            if (!identity) await new Promise((r) => setTimeout(r, 250))
+        }
+        if (!identity) {
+            baseManager.remove(baseKeyHex)
+            clearWriteChain(ctx)
+            await closeSharedBase(ctx)
+            return { ok: false, reason: 'join-timeout' }
+        }
+
+        _listIdToBaseKey.set(identity.listId, baseKeyHex)
+        const regOk = await updateItem(buildListMetaItem({ id: identity.listId, name: identity.name, type: identity.type, baseKey: baseKeyHex, updatedAt: Date.now() }))
+        if (!regOk) {
+            _listIdToBaseKey.delete(identity.listId)
+            baseManager.remove(baseKeyHex)
+            clearWriteChain(ctx)
+            await closeSharedBase(ctx)
+            return { ok: false, reason: 'registry-write-failed' }
+        }
+
+        await rebuildSharedListFromView(ctx)
+        projectSharedListToFrontend(ctx)
+        logger.log('[INFO] Joined shared list', { listId: identity.listId, baseKey: baseKeyHex.slice(0, 16), writable })
+        return { ok: true, baseKey: baseKeyHex, listId: identity.listId, writable }
+    } catch (e) {
+        logger.log('[ERROR] joinList failed:', e)
+        if (ctx) {
+            if (baseKeyHex) baseManager.remove(baseKeyHex)
+            try { clearWriteChain(ctx) } catch (_) {}
+            try { await closeSharedBase(ctx) } catch (_) {}
+        }
+        return { ok: false, reason: 'join-failed' }
+    }
 }
 
 export async function apply (ctx, nodes, view, host) {
