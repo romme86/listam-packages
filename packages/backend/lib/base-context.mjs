@@ -11,11 +11,21 @@
 // `role`: 'personal' (the always-present primary, mirrors state.mjs) or 'shared'
 // (one per shared list). `baseId`: a stable id for the base (its discovery-key
 // hex), used as the storage namespace and the BaseManager map key.
+import { createViewCheckpoint } from './view-checkpoint.mjs'
 
 export function createBaseContext ({ role = 'shared', baseId = null, baseKey = null } = {}) {
     return {
         role,
         baseId,
+
+        // The setters + apply-membership checkpoint apply(ctx, …) calls on a shared
+        // base. (The primaryContext adapter in backend.mjs provides the same shape,
+        // delegating to the state.mjs globals + the module-level checkpoint.)
+        setMembershipState (v) { this.membershipState = v },
+        setBoardConfigState (v) { this.boardConfigState = v },
+        setCurrentList (v) { this.currentList = v },
+        setEpochKey (v) { this.epochKey = v },
+        applyMembershipCheckpoint: createViewCheckpoint(),
 
         // Core P2P instances (per base)
         autobase: null,

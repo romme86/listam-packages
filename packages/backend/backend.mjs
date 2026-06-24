@@ -703,6 +703,22 @@ export const primaryContext = {
     applyMembershipCheckpoint,
 }
 
+// Push an item op from apply() to the frontend. For the personal base this is
+// byte-identical to before (the bare item over `command`). For a SHARED base the
+// payload is tagged with its baseKey (hex) so the UI routes it to that shared
+// list's bucket. Null-safe so apply() can run on a base with no RPC channel.
+function pushFromBackend (ctx, command, item) {
+    if (!rpc) return
+    try {
+        const payload = ctx.role === 'shared' && ctx.baseKey
+            ? { ...item, baseKey: b4a.toString(ctx.baseKey, 'hex') }
+            : item
+        rpc.request(command).send(JSON.stringify(payload))
+    } catch (e) {
+        logger.log('[ERROR] pushFromBackend failed:', e)
+    }
+}
+
 export async function apply (ctx, nodes, view, host) {
     if (ctx.autobase?.closing) {
         logger.log('[WARNING] Apply called while Autobase is closing; skipping.')
@@ -831,8 +847,7 @@ export async function apply (ctx, nodes, view, host) {
             logger.log('[INFO] Applying add operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
             ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
-            const addReq = rpc.request(RPC_ADD_FROM_BACKEND)
-            addReq.send(JSON.stringify(operation.value))
+            pushFromBackend(ctx, RPC_ADD_FROM_BACKEND, operation.value)
             continue
         }
 
@@ -844,8 +859,7 @@ export async function apply (ctx, nodes, view, host) {
             logger.log('[INFO] Applying delete operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
             ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
-            const deleteReq = rpc.request(RPC_DELETE_FROM_BACKEND)
-            deleteReq.send(JSON.stringify(operation.value))
+            pushFromBackend(ctx, RPC_DELETE_FROM_BACKEND, operation.value)
             continue
         }
 
@@ -857,8 +871,7 @@ export async function apply (ctx, nodes, view, host) {
             logger.log('[INFO] Applying update operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
             ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
-            const updateReq = rpc.request(RPC_UPDATE_FROM_BACKEND)
-            updateReq.send(JSON.stringify(operation.value))
+            pushFromBackend(ctx, RPC_UPDATE_FROM_BACKEND, operation.value)
             continue
         }
 
@@ -871,8 +884,12 @@ export async function apply (ctx, nodes, view, host) {
             await view.append(createListViewEntry(operation))
             const nextList = applyOperationToList(ctx.currentList, operation)
             ctx.setCurrentList(nextList)
-            const updateReq = rpc.request(SYNC_LIST)
-            updateReq.send(JSON.stringify(nextList))
+            if (rpc) {
+                const listPayload = ctx.role === 'shared' && ctx.baseKey
+                    ? { list: nextList, baseKey: b4a.toString(ctx.baseKey, 'hex') }
+                    : nextList
+                rpc.request(SYNC_LIST).send(JSON.stringify(listPayload))
+            }
             continue
         }
 
