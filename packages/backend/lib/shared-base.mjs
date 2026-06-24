@@ -10,7 +10,10 @@ import Autobase from 'autobase'
 import Hyperswarm from 'hyperswarm'
 import b4a from 'b4a'
 import { apply, open, swarmBootstrap } from '../backend.mjs'
+import { getBackendFs } from './platform-fs.mjs'
 import { logger } from './logger.mjs'
+
+const ENC_HEX = /^[0-9a-f]{64}$/
 
 // Open (and, by default, start replicating) a shared base into `ctx`.
 //   baseKey = null  → bootstrap a fresh base (this device is the first writer).
@@ -20,6 +23,17 @@ import { logger } from './logger.mjs'
 export async function openSharedBase (ctx, { baseKey = null, encryptionKey = null, storageDir, bootstrap = swarmBootstrap, joinSwarm = true } = {}) {
     if (!storageDir) throw new Error('openSharedBase requires a storageDir')
 
+    // A base's encryption key must survive restarts — a fresh base auto-generates
+    // one, and losing it makes all its data undecryptable on reopen. Persist it
+    // once, per base, next to its Corestore. (Joiners pass the key from the invite.)
+    const fsA = getBackendFs()
+    const keyFile = `${storageDir}/encryption.key`
+    let encKey = encryptionKey
+    if (!encKey && fsA.existsSync(keyFile)) {
+        const hex = fsA.readFileSync(keyFile, 'utf8').trim().toLowerCase()
+        if (ENC_HEX.test(hex)) encKey = b4a.from(hex, 'hex')
+    }
+
     ctx.store = new Corestore(storageDir)
     await ctx.store.ready()
     ctx.autobase = new Autobase(ctx.store, baseKey, {
@@ -27,12 +41,15 @@ export async function openSharedBase (ctx, { baseKey = null, encryptionKey = nul
         open,
         valueEncoding: 'json',
         encrypt: true,
-        encryptionKey: encryptionKey || undefined,
+        encryptionKey: encKey || undefined,
     })
     await ctx.autobase.ready()
     ctx.baseKey = ctx.autobase.key
     ctx.encryptionKey = ctx.autobase.encryptionKey
     ctx.baseId = b4a.toString(ctx.autobase.key, 'hex')
+    if (ctx.autobase.encryptionKey && !fsA.existsSync(keyFile)) {
+        try { fsA.writeFileSync(keyFile, b4a.toString(ctx.autobase.encryptionKey, 'hex')) } catch (e) { logger.log('[ERROR] shared base key persist:', e) }
+    }
     await ctx.autobase.update()
 
     if (joinSwarm) {

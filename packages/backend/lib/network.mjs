@@ -1052,11 +1052,11 @@ export async function removeMemberAndRotateEpoch(writerKey) {
 // Build the membership roster for the frontend: who the writers are, which one
 // is the owner, which one is this device, and whether this device can administer
 // (hold owner authority). Writer keys are opaque public identifiers, not secrets.
-export function broadcastMembershipRoster() {
-    const localWriterKey = autobase?.local?.key ? autobase.local.key.toString('hex') : null
-    const roster = buildMembershipRoster(membershipState, {
+export function broadcastMembershipRoster(ctx = primaryContext) {
+    const localWriterKey = ctx.autobase?.local?.key ? ctx.autobase.local.key.toString('hex') : null
+    const roster = buildMembershipRoster(ctx.membershipState, {
         localWriterKey,
-        hasOwnerAuthority: !!ownerAuthorityKeyPair && canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair),
+        hasOwnerAuthority: !!ctx.ownerAuthorityKeyPair && canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair),
     })
     broadcastMessage({ type: 'membership-roster', roster })
 }

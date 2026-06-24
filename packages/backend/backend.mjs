@@ -48,6 +48,7 @@ import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, can
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
+import { isPersonalContext } from './lib/base-context.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
 import {
@@ -664,9 +665,9 @@ function notifyFrontend(payload) {
 
 // Push the current board config and whether this device can administer it
 // (holds the board creator's owner authority).
-function broadcastBoardConfig() {
-    const config = boardConfigState?.config || normalizeBoardConfig(null)
-    const canAdminister = canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair)
+function broadcastBoardConfig(ctx = primaryContext) {
+    const config = ctx.boardConfigState?.config || normalizeBoardConfig(null)
+    const canAdminister = canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair)
     notifyFrontend({ type: 'board-config', config, canAdminister })
 }
 
@@ -699,7 +700,10 @@ export const primaryContext = {
     setBoardConfigState,
     get currentList () { return currentList },
     setCurrentList,
+    get epochKey () { return epochKey },
     setEpochKey,
+    get epochEncryptionKeyPair () { return epochEncryptionKeyPair },
+    get ownerAuthorityKeyPair () { return ownerAuthorityKeyPair },
     applyMembershipCheckpoint,
 }
 
@@ -753,7 +757,7 @@ export async function apply (ctx, nodes, view, host) {
             await view.append({ op: 'membership', record: value })
 
             if (result.effect?.epochGrants) {
-                await adoptGrantedEpochKey(result)
+                await adoptGrantedEpochKey(ctx, result)
             }
 
             if (result.effect?.addWriterKey) {
@@ -783,14 +787,16 @@ export async function apply (ctx, nodes, view, host) {
                 }
                 if (ctx.autobase?.local?.key?.toString('hex') === result.effect.removeWriterKey) {
                     ctx.setEpochKey(null)
-                    await deleteEpochKey()
+                    // Per-base persisted epoch keys for shared bases aren't wired
+                    // yet; only the personal base's stored key may be retired here.
+                    if (isPersonalContext(ctx)) await deleteEpochKey()
                     logger.log('[AUDIT] Local writer was removed; retired local epoch key')
                 }
             }
 
             // The writer set changed; refresh the frontend roster.
             if (result.effect?.addWriterKey || result.effect?.removeWriterKey) {
-                broadcastMembershipRoster()
+                broadcastMembershipRoster(ctx)
             }
             continue
         }
@@ -809,11 +815,11 @@ export async function apply (ctx, nodes, view, host) {
                 continue
             }
             await view.append({ op: 'board-config', record: value })
-            broadcastBoardConfig()
+            broadcastBoardConfig(ctx)
             continue
         }
 
-        const unwrappedOperation = unwrapListOperation(value)
+        const unwrappedOperation = unwrapListOperation(ctx, value)
         if (!unwrappedOperation) continue
 
         // Legacy add-writer records are intentionally no longer authoritative.
@@ -898,14 +904,14 @@ export async function apply (ctx, nodes, view, host) {
     }
 }
 
-async function adoptGrantedEpochKey(result) {
-    if (!autobase?.local?.key || !epochEncryptionKeyPair) return
+async function adoptGrantedEpochKey(ctx, result) {
+    if (!ctx.autobase?.local?.key || !ctx.epochEncryptionKeyPair) return
 
-    const localWriterKey = autobase.local.key.toString('hex')
+    const localWriterKey = ctx.autobase.local.key.toString('hex')
     const grantedEpochKey = decryptEpochGrantForWriter(
         result.effect.epochGrants,
         localWriterKey,
-        epochEncryptionKeyPair,
+        ctx.epochEncryptionKeyPair,
     )
     if (!grantedEpochKey) return
 
@@ -914,26 +920,28 @@ async function adoptGrantedEpochKey(result) {
         return
     }
 
-    setEpochKey(grantedEpochKey)
-    await saveEpochKey(grantedEpochKey)
+    ctx.setEpochKey(grantedEpochKey)
+    // Per-base epoch-key persistence for shared bases isn't wired yet; only the
+    // personal base persists to the global epoch-key slot.
+    if (isPersonalContext(ctx)) await saveEpochKey(grantedEpochKey)
     logger.log('[INFO] Adopted granted epoch key', {
         epoch: result.state.currentEpoch,
         epochKeyHash: result.effect.epochKeyHash,
     })
 }
 
-function unwrapListOperation(value) {
+function unwrapListOperation(ctx, value) {
     if (!isEncryptedListOperation(value)) return value
 
-    if (Number(value.epoch) !== Number(membershipState?.currentEpoch)) {
+    if (Number(value.epoch) !== Number(ctx.membershipState?.currentEpoch)) {
         logger.log('[WARNING] Ignoring encrypted list op for inactive epoch', {
             opEpoch: value.epoch,
-            currentEpoch: membershipState?.currentEpoch,
+            currentEpoch: ctx.membershipState?.currentEpoch,
         })
         return null
     }
 
-    const operation = decryptEncryptedListOperation(value, epochKey)
+    const operation = decryptEncryptedListOperation(value, ctx.epochKey)
     if (!operation) {
         logger.log('[WARNING] Could not decrypt encrypted list op for current epoch')
         return null

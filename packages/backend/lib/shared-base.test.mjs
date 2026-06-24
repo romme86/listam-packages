@@ -3,9 +3,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { setBackendFs } from './platform-fs.mjs'
 import { createBaseContext } from './base-context.mjs'
 import { openSharedBase, closeSharedBase } from './shared-base.mjs'
 import { createListOperation } from './list-reducer.mjs'
+
+setBackendFs(fs) // openSharedBase persists the base encryption key via the fs adapter
 
 // Verifies the shared-base open path + the ctx-bound apply end to end, in-process
 // (no swarm): a write to the base flows through apply() — which is bound to THIS
@@ -34,6 +37,19 @@ test('openSharedBase: a write flows through ctx-bound apply into ctx.currentList
         await ctx.autobase.update()
         assert.equal(ctx.currentList.length, 1)
         assert.equal(ctx.currentList[0].isDone, true)
+    } finally {
+        await closeSharedBase(ctx)
+    }
+})
+
+test('openSharedBase persists the auto-generated encryption key for reuse on reopen', async () => {
+    const ctx = createBaseContext({ role: 'shared' })
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'listam-sb-'))
+    await openSharedBase(ctx, { storageDir: dir, joinSwarm: false })
+    try {
+        const keyFile = path.join(dir, 'encryption.key')
+        assert.ok(fs.existsSync(keyFile), 'encryption key file is written')
+        assert.equal(fs.readFileSync(keyFile, 'utf8').trim(), Buffer.from(ctx.encryptionKey).toString('hex'))
     } finally {
         await closeSharedBase(ctx)
     }
