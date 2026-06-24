@@ -93,3 +93,46 @@ test('shared base: A shares + seeds, B joins as writer, both edit, converges', a
         await testnet.destroy()
     }
 })
+
+// A shared base must survive a restart: its epoch/owner secrets are persisted
+// per-base (next to the Corestore), the membership (owner/writers) is rebuilt
+// from the view, currentList is restored, the owner can re-mint invites, and a
+// fresh epoch-encrypted write still round-trips through apply. (No swarm — a
+// single process opens, closes, and reopens the same on-disk base.)
+test('shared base survives reopen: secrets persist, membership rebuilds, epoch writes still decrypt', async () => {
+    const dir = mkdir()
+    const ctx1 = createBaseContext({ role: 'shared' })
+    await openSharedBase(ctx1, { storageDir: dir, joinSwarm: false })
+    await bootstrapSharedOwner(ctx1)
+    assert.equal(ctx1.membershipState.currentEpoch, 1, 'epoch 1 after bootstrap')
+    await seedSharedBase(ctx1, [
+        { id: 'm1', text: 'Milk', isDone: false, timeOfCompletion: 0, listId: 'default', listType: 'shopping', updatedAt: 1 },
+    ])
+    assert.deepEqual(texts(ctx1), ['Milk'])
+    assert.ok(createSharedInvite(ctx1), 'owner mints an invite pre-restart')
+    const baseKey = ctx1.baseKey
+    await closeSharedBase(ctx1)
+
+    // Reopen the same base into a fresh context (simulates an app restart).
+    const ctx2 = createBaseContext({ role: 'shared' })
+    await openSharedBase(ctx2, { baseKey, storageDir: dir, joinSwarm: false })
+    try {
+        assert.equal(ctx2.autobase.writable, true, 'owner stays writable on reopen')
+        assert.ok(ctx2.epochKey, 'epoch key restored from disk')
+        assert.ok(ctx2.ownerAuthorityKeyPair, 'owner authority restored from disk')
+        assert.ok(ctx2.membershipState.ownerAuthorityKey, 'membership owner rebuilt from the view')
+        assert.equal(ctx2.membershipState.currentEpoch, 1, 'epoch rebuilt from the view')
+        assert.deepEqual(texts(ctx2), ['Milk'], 'currentList rebuilt from the persisted view')
+
+        // The owner can mint a fresh invite after the restart.
+        assert.ok(createSharedInvite(ctx2), 'owner re-mints an invite after reopen')
+
+        // A new epoch-encrypted write applies AND decrypts — only possible if the
+        // epoch key was correctly persisted and reloaded.
+        assert.equal(await addItem('Eggs', 'default', 'shopping', null, ctx2), true)
+        await ctx2.autobase.update()
+        assert.deepEqual(texts(ctx2), ['Eggs', 'Milk'], 'post-restart epoch write round-trips')
+    } finally {
+        await closeSharedBase(ctx2)
+    }
+})

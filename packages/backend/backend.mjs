@@ -52,7 +52,7 @@ import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/bo
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
-import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView } from './lib/shared-base.mjs'
+import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView, persistSharedSecrets } from './lib/shared-base.mjs'
 import { reduceRegistry, isRegistryItem, REG_KIND_LIST, buildListMetaItem } from './lib/list-registry.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
@@ -813,6 +813,57 @@ function sharedStorageDir (dirName) {
     return `${storagePath}/shared/${dirName}`
 }
 
+// A shared base's Corestore dir cannot be named by its base key (the key isn't
+// known until the store exists), so a small JSON index maps baseKeyHex → dir
+// name. It lets reconcile re-open, on restart, exactly the shared bases this
+// device has LOCALLY joined/created (those with per-base secrets on disk).
+function sharedIndexPath () {
+    return `${storagePath}/shared/index.json`
+}
+
+function loadSharedIndex () {
+    try {
+        const fsA = getBackendFs()
+        if (!fsA.existsSync(sharedIndexPath())) return {}
+        const raw = fsA.readFileSync(sharedIndexPath(), 'utf8')
+        const obj = JSON.parse(raw)
+        return obj && typeof obj === 'object' ? obj : {}
+    } catch (e) {
+        // A corrupt index would otherwise be silently overwritten by the next
+        // record (losing every other base's entry). Preserve a copy so the
+        // entries can be recovered, and surface it loudly.
+        logger.log('[ERROR] loadSharedIndex: shared-base index is unreadable; preserving a .corrupt copy', e)
+        try {
+            const fsA = getBackendFs()
+            if (fsA.existsSync(sharedIndexPath())) fsA.renameSync(sharedIndexPath(), `${sharedIndexPath()}.corrupt`)
+        } catch (_) {}
+        return {}
+    }
+}
+
+// Writes to index.json are serialized through this chain (handleFrontendRequest
+// runs RPCs concurrently, so two near-simultaneous share/join ops could
+// otherwise read-modify-write the same stale index and clobber each other).
+let _indexWriteChain = Promise.resolve()
+
+function recordSharedBaseDir (baseKeyHex, dirName) {
+    _indexWriteChain = _indexWriteChain.then(() => {
+        try {
+            const fsA = getBackendFs()
+            const idx = loadSharedIndex()
+            if (idx[baseKeyHex] === dirName) return
+            idx[baseKeyHex] = dirName
+            try { fsA.mkdirSync(`${storagePath}/shared`, { recursive: true }) } catch (e) { logger.log('[ERROR] recordSharedBaseDir mkdir:', e) }
+            // Atomic write: a truncated write (crash/power loss) must not corrupt
+            // the live index — write a temp file then rename over it.
+            const tmp = `${sharedIndexPath()}.tmp`
+            fsA.writeFileSync(tmp, JSON.stringify(idx))
+            fsA.renameSync(tmp, sharedIndexPath())
+        } catch (e) { logger.log('[ERROR] recordSharedBaseDir:', e) }
+    })
+    return _indexWriteChain
+}
+
 // Push a shared base's already-materialized items to the frontend, each tagged
 // with its baseKey so the UI routes them to that shared list's bucket (the
 // per-item analogue of projectItemsToFrontend, but base-tagged). Items that
@@ -831,16 +882,53 @@ function projectSharedListToFrontend (ctx) {
     }
 }
 
-// reconcile() asks the manager to open a shared base referenced by the personal
-// registry that is not already open. Within a session, shareList/joinList
-// register their ctx directly (so this is a no-op for them). The remaining
-// callers are COLD BOOT and a paired device's AUTO-JOIN — both need per-base
-// secret persistence (epoch/owner keys) and, for auto-join, credential
-// propagation, which are not wired yet. Skipping keeps the base from opening in
-// an undecryptable state; cross-restart reopen + auto-join is the next step.
+// reconcile() asks the manager to open a registry-referenced shared base that is
+// not already open. Within a session, shareList/joinList register their ctx
+// directly, so this fires on COLD BOOT (reopen a base joined in a past session)
+// and for a paired device's would-be AUTO-JOIN. Reopen works for bases this
+// device has LOCALLY (an index entry + per-base secrets on disk); a base only
+// referenced by the synced registry (never joined here) is skipped — credential
+// propagation for cross-device auto-join without an invite is not wired yet.
 async function openSharedForManager (baseKeyHex) {
-    logger.log('[INFO] Shared base referenced by registry is not open locally; cross-restart reopen / auto-join not wired yet — skipping', baseKeyHex?.slice?.(0, 16))
-    return null
+    const dirName = loadSharedIndex()[baseKeyHex]
+    if (!dirName) {
+        logger.log('[INFO] Shared base in registry but not local (never joined here); cross-device auto-join not wired — skipping', baseKeyHex?.slice?.(0, 16))
+        return null
+    }
+    const storageDir = sharedStorageDir(dirName)
+    // The index can drift from disk (dir deleted / lost). Opening a fresh empty
+    // Corestore there would silently present a blank, editable list (data loss).
+    try {
+        if (!getBackendFs().existsSync(storageDir)) {
+            logger.log('[ERROR] Shared base storage dir missing on reopen; skipping (not recreating empty)', { baseKey: baseKeyHex.slice(0, 16), dirName })
+            return null
+        }
+    } catch (_) {}
+    let ctx = null
+    try {
+        ctx = createBaseContext({ role: 'shared', baseId: baseKeyHex, baseKey: b4a.from(baseKeyHex, 'hex') })
+        await openSharedBase(ctx, { baseKey: ctx.baseKey, storageDir, bootstrap: swarmBootstrap })
+        // A real shared base ALWAYS has an epoch (bootstrap epoch 1, or the
+        // invite's). No epoch key after reopen ⇒ the per-base secrets are
+        // missing/corrupt; reopening would skip every encrypted op (silent
+        // divergence) and the owner could not mint invites. Skip instead.
+        if (!ctx.epochKey) {
+            logger.log('[ERROR] Reopened shared base has no epoch key (secrets missing/corrupt); skipping', baseKeyHex.slice(0, 16))
+            await closeSharedBase(ctx)
+            return null
+        }
+        // Owner: re-arm the pairing listener so it keeps accepting joiners after
+        // a restart (its authority/epoch were restored from disk by openSharedBase).
+        if (canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair)) setupSharedPairing(ctx)
+        projectSharedListToFrontend(ctx)
+        broadcastMembershipRoster(ctx) // the UI must learn the rebuilt membership/owner state
+        logger.log('[INFO] Reopened shared base on boot', { baseKey: baseKeyHex.slice(0, 16), writable: ctx.autobase.writable })
+        return ctx
+    } catch (e) {
+        logger.log('[ERROR] Failed to reopen shared base:', baseKeyHex?.slice?.(0, 16), e)
+        if (ctx) { try { await closeSharedBase(ctx) } catch (_) {} }
+        return null
+    }
 }
 
 async function closeSharedForManager (_baseKeyHex, ctx) {
@@ -852,7 +940,16 @@ async function closeSharedForManager (_baseKeyHex, ctx) {
 // Diff the personal registry's shared-base references against what's open and
 // open/close to converge. This is what auto-opens a device's shared lists on
 // boot and auto-joins them after a paired device syncs a new registry entry.
-async function reconcileSharedBases () {
+// Serialized: two overlapping reconciles could each see a base as not-open and
+// both open it (duplicate Corestore on one dir). The chain makes them run one
+// at a time; each reads the latest registry at its turn.
+let _reconcileChain = Promise.resolve()
+function reconcileSharedBases () {
+    _reconcileChain = _reconcileChain.then(doReconcileSharedBases, doReconcileSharedBases)
+    return _reconcileChain
+}
+
+async function doReconcileSharedBases () {
     if (!baseManager) return
     // Only reconcile against a STABLE personal base. During an initAutobase
     // teardown/switch the personal autobase is briefly null/closing and
@@ -974,6 +1071,7 @@ async function shareList (listId) {
         await bootstrapSharedOwner(ctx)
         setupSharedPairing(ctx)
         baseKeyHex = ctx.baseId
+        recordSharedBaseDir(baseKeyHex, dirName) // so reconcile reopens it on restart
 
         // Seed the list's items (identity preserved) PLUS a self-describing
         // registry meta-item, so a joiner learns the canonical listId even for
@@ -1005,6 +1103,7 @@ async function shareList (listId) {
         try { await deleteItem(item) } catch (e) { logger.log('[ERROR] share-list tombstone:', e) }
     }
     projectSharedListToFrontend(ctx)
+    broadcastMembershipRoster(ctx) // the owner can administer this shared list
     const invite = createSharedInvite(ctx) || null
     logger.log('[INFO] Shared list promoted to its own base', { listId, baseKey: baseKeyHex.slice(0, 16), invite: !!invite })
     return { ok: true, invite, baseKey: baseKeyHex }
@@ -1030,6 +1129,7 @@ async function joinList (invite) {
         baseKeyHex = joined.baseKeyHex
         const writable = joined.writable
         baseManager.register(baseKeyHex, ctx)
+        recordSharedBaseDir(baseKeyHex, dirName) // so reconcile reopens it on restart
 
         // Adopt the shared list's CANONICAL id from the base's own self-describing
         // registry meta-item (or, fallback, a replicated item). Never invent a
@@ -1062,6 +1162,7 @@ async function joinList (invite) {
 
         await rebuildSharedListFromView(ctx)
         projectSharedListToFrontend(ctx)
+        broadcastMembershipRoster(ctx) // surface the joined base's membership to the UI
         logger.log('[INFO] Joined shared list', { listId: identity.listId, baseKey: baseKeyHex.slice(0, 16), writable })
         return { ok: true, baseKey: baseKeyHex, listId: identity.listId, writable }
     } catch (e) {
@@ -1283,9 +1384,13 @@ async function adoptGrantedEpochKey(ctx, result) {
     }
 
     ctx.setEpochKey(grantedEpochKey)
-    // Per-base epoch-key persistence for shared bases isn't wired yet; only the
-    // personal base persists to the global epoch-key slot.
+    // Persist the rotated key so it survives a restart: the personal base uses
+    // the global secure slot; a shared base persists per-base next to its
+    // Corestore (otherwise a reopen would reload the OLD epoch key and could not
+    // decrypt anything written under the new one). Shared-base rekey isn't wired
+    // yet, but this keeps adoption correct for when it is.
     if (isPersonalContext(ctx)) await saveEpochKey(grantedEpochKey)
+    else persistSharedSecrets(ctx)
     logger.log('[INFO] Adopted granted epoch key', {
         epoch: result.state.currentEpoch,
         epochKeyHash: result.effect.epochKeyHash,

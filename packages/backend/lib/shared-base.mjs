@@ -21,6 +21,8 @@ import { getBackendFs } from './platform-fs.mjs'
 import { logger } from './logger.mjs'
 import { createListOperation } from './list-reducer.mjs'
 import { reduceRegistry, isRegistryItem } from './list-registry.mjs'
+import { reduceMembershipLog } from './membership.mjs'
+import { reduceBoardConfigLog } from './board-config.mjs'
 import { prepareListAppendOperation } from './item.mjs'
 import {
     canCreateMembershipInvite,
@@ -29,12 +31,14 @@ import {
     createOwnerBootstrapRecord,
     nextMembershipSequence,
     ownerAuthorityPublicKeyHex,
+    ownerAuthoritySecretKeyHex,
 } from './membership.mjs'
 import {
     createEpochEncryptionKeyPair,
     decodeInviteEpochData,
     encodeInviteEpochData,
     epochPublicKeyHex,
+    epochSecretKeyHex,
     generateEpochKey,
 } from './key-epochs.mjs'
 import { INVITE_MAX_USES, isInviteUsable, reserveInviteUse, withInvitePolicy } from './invite-policy.mjs'
@@ -118,6 +122,58 @@ export function sharedDirNameForInvite (invite) {
     return `joined-${b4a.toString(info.discoveryKey, 'hex')}`
 }
 
+// --- Per-base secret persistence ----------------------------------------------
+// A shared base's epoch key (+ epoch-encryption keypair, + owner authority for
+// the owner) live next to its Corestore — the per-base analogue of the personal
+// base's secure-store secrets, mirroring the encryption.key already kept here.
+// Without this a shared base could not decrypt its own items after a restart and
+// the owner could not re-mint invites. (Plaintext-on-disk, like encryption.key:
+// the proximity-trust boundary is filesystem access, which already exposes the
+// Corestore's encryption key.)
+const SECRET_FILES = { epoch: 'epoch.key', epochEnc: 'epoch-enc.key', owner: 'owner.key' }
+
+function writeSecretFile (storageDir, name, hex) {
+    try { getBackendFs().writeFileSync(`${storageDir}/${name}`, hex) } catch (e) { logger.log('[ERROR] shared secret persist', name, e) }
+}
+
+function readSecretFile (storageDir, name) {
+    try {
+        const fsA = getBackendFs()
+        const p = `${storageDir}/${name}`
+        if (!fsA.existsSync(p)) return null
+        const hex = fsA.readFileSync(p, 'utf8').trim().toLowerCase()
+        return /^[0-9a-f]+$/.test(hex) && hex.length % 2 === 0 ? hex : null
+    } catch (e) { logger.log('[ERROR] shared secret read', name, e); return null }
+}
+
+// Persist whichever secrets ctx currently holds. Safe to call repeatedly.
+export function persistSharedSecrets (ctx) {
+    if (!ctx.storageDir) return
+    if (ctx.epochKey) writeSecretFile(ctx.storageDir, SECRET_FILES.epoch, b4a.toString(ctx.epochKey, 'hex'))
+    const encHex = epochSecretKeyHex(ctx.epochEncryptionKeyPair)
+    if (encHex) writeSecretFile(ctx.storageDir, SECRET_FILES.epochEnc, encHex)
+    const ownerHex = ownerAuthoritySecretKeyHex(ctx.ownerAuthorityKeyPair)
+    if (ownerHex) writeSecretFile(ctx.storageDir, SECRET_FILES.owner, ownerHex)
+}
+
+// Load any persisted secrets into ctx (reopen). Must run before apply() can be
+// asked to decrypt epoch-encrypted ops.
+function loadSharedSecrets (ctx) {
+    if (!ctx.storageDir) return
+    const epochHex = readSecretFile(ctx.storageDir, SECRET_FILES.epoch)
+    if (epochHex && !ctx.epochKey) ctx.setEpochKey(b4a.from(epochHex, 'hex'))
+    const encHex = readSecretFile(ctx.storageDir, SECRET_FILES.epochEnc)
+    if (encHex && !ctx.epochEncryptionKeyPair) {
+        const kp = createEpochEncryptionKeyPair(b4a.from(encHex, 'hex'))
+        if (kp) ctx.epochEncryptionKeyPair = kp
+    }
+    const ownerHex = readSecretFile(ctx.storageDir, SECRET_FILES.owner)
+    if (ownerHex && !ctx.ownerAuthorityKeyPair) {
+        const kp = createOwnerAuthorityKeyPair(b4a.from(ownerHex, 'hex'))
+        if (kp) ctx.ownerAuthorityKeyPair = kp
+    }
+}
+
 // --- Open / close -------------------------------------------------------------
 
 // Open (and, by default, start replicating) a shared base into `ctx`.
@@ -140,6 +196,7 @@ export async function openSharedBase (ctx, { baseKey = null, encryptionKey = nul
         if (ENC_HEX.test(hex)) encKey = b4a.from(hex, 'hex')
     }
 
+    ctx.storageDir = storageDir
     ctx.store = store || new Corestore(storageDir)
     await ctx.store.ready()
 
@@ -160,6 +217,9 @@ export async function openSharedBase (ctx, { baseKey = null, encryptionKey = nul
     ctx.baseKey = ctx.autobase.key
     ctx.encryptionKey = ctx.autobase.encryptionKey
     ctx.baseId = b4a.toString(ctx.autobase.key, 'hex')
+    // Restore this base's epoch/owner secrets (reopen) BEFORE update(), so apply
+    // can decrypt epoch-encrypted ops and the owner regains invite authority.
+    loadSharedSecrets(ctx)
     if (ctx.autobase.encryptionKey && !fsA.existsSync(keyFile)) {
         try { fsA.writeFileSync(keyFile, b4a.toString(ctx.autobase.encryptionKey, 'hex')) } catch (e) { logger.log('[ERROR] shared base key persist:', e) }
     }
@@ -198,16 +258,23 @@ export async function closeSharedBase (ctx) {
     ctx.store = null
 }
 
-// Rebuild ctx.currentList (the default-list projection of this base) from the
-// persisted view. Needed because Autobase does not re-run apply over history on
-// reopen, so a restarted/auto-opened base would otherwise show an empty list.
-// Idempotent; the per-ctx checkpoint resumes from its last scan.
+// Rebuild this base's in-memory state (currentList + membership + board config)
+// from the persisted view. Needed because Autobase does not re-run apply over
+// history on reopen, so a restarted/auto-opened base would otherwise show an
+// empty list AND an empty membership (owner unable to mint invites). Idempotent;
+// the per-ctx checkpoint resumes its scan, and apply() independently re-derives
+// the same membership on its first post-reopen pass.
 export async function rebuildSharedListFromView (ctx) {
     if (!ctx.autobase?.view || !ctx.viewCheckpoint) return
     try {
-        const { items } = await ctx.viewCheckpoint.update(ctx.autobase.view, {
+        const { items, membershipRecords, boardConfigRecords } = await ctx.viewCheckpoint.update(ctx.autobase.view, {
             onError: (i, e) => logger.log('[ERROR] shared rebuild entry', i, e?.message ?? e),
         })
+        ctx.setMembershipState(reduceMembershipLog(membershipRecords, { baseKey: ctx.autobase?.key }))
+        ctx.setBoardConfigState(reduceBoardConfigLog(boardConfigRecords, {
+            baseKey: ctx.autobase?.key,
+            ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
+        }))
         ctx.setCurrentList(items)
     } catch (e) {
         logger.log('[ERROR] rebuildSharedListFromView failed:', e)
@@ -217,7 +284,12 @@ export async function rebuildSharedListFromView (ctx) {
 // --- Owner bootstrap (first writer of a fresh shared base) --------------------
 export async function bootstrapSharedOwner (ctx) {
     if (!ctx.autobase?.writable) throw new Error('shared base not writable; cannot bootstrap owner')
-    if (ctx.membershipState?.ownerAuthorityKey) return // already bootstrapped (reopen)
+    // Idempotent: skip if already bootstrapped. Check the keypair too, not just
+    // the reduced public key — on a fresh base the public key only appears in
+    // membershipState after apply() processes the record, so a second call
+    // before then would otherwise mint a SECOND owner keypair that mismatches
+    // the one already in the appended bootstrap record.
+    if (ctx.membershipState?.ownerAuthorityKey || ctx.ownerAuthorityKeyPair) return
 
     const ownerKeyPair = createOwnerAuthorityKeyPair()
     const epochEncryptionKeyPair = createEpochEncryptionKeyPair()
@@ -236,6 +308,7 @@ export async function bootstrapSharedOwner (ctx) {
     })
     await ctx.autobase.append(record)
     await ctx.autobase.update()
+    persistSharedSecrets(ctx) // durable across restarts (epoch + epoch-enc + owner)
     logger.log('[INFO] Bootstrapped shared-base owner', { ownerAuthorityKey: ownerAuthorityPublicKeyHex(ownerKeyPair) })
 }
 
@@ -422,6 +495,7 @@ export async function joinSharedBaseViaInvite (createBaseContext, { invite, stor
             bootstrap,
             joinSwarm,
         })
+        persistSharedSecrets(ctx) // epoch key + our epoch-encryption keypair (no owner)
 
         // Replicate over the temp swarm's live connection so data flows before
         // the main swarm finds the host over the DHT.
