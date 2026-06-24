@@ -28,6 +28,18 @@ test('buildListMetaItem / buildGroupMetaItem produce well-shaped registry items'
     assert.equal(isRegistryItem({ listType: 'kanban' }), false)
 })
 
+test('regBaseKey: written only when given; reduceRegistry surfaces it as baseKey (null otherwise)', () => {
+    const personal = buildListMetaItem({ id: 'a', name: 'A', type: 'shopping', updatedAt: 1 })
+    assert.equal('regBaseKey' in personal, false) // back-compat: no field for personal-base lists
+    const shared = buildListMetaItem({ id: 'b', name: 'B', type: 'shopping', baseKey: 'deadbeef', updatedAt: 1 })
+    assert.equal(shared.regBaseKey, 'deadbeef')
+
+    const reg = reduceRegistry([personal, shared])
+    const byId = Object.fromEntries(reg.lists.map((l) => [l.id, l]))
+    assert.equal(byId.a.baseKey, null)
+    assert.equal(byId.b.baseKey, 'deadbeef')
+})
+
 test('reduceRegistry partitions and sorts groups + lists', () => {
     const items = [
         buildGroupMetaItem({ id: 'g2', name: 'Trips', order: 1, updatedAt: 1 }),

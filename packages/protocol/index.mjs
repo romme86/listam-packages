@@ -62,3 +62,9 @@ export const RPC_MOVE = 28
 export const RPC_LIST_BACKUPS = 29
 export const RPC_RESTORE_BACKUP = 30
 export const RPC_SET_BACKUP_PASSWORD = 31
+// Single-list sharing (multi-base). SHARE_LIST { listId } promotes a list into
+// its OWN base and returns a BlindPairing invite for it. JOIN_LIST { invite }
+// ADDITIVELY joins a shared list's base (unlike RPC_JOIN_KEY, which replaces the
+// whole personal base). Both reply request/response.
+export const RPC_SHARE_LIST = 32
+export const RPC_JOIN_LIST = 33

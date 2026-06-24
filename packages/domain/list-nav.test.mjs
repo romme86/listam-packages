@@ -37,6 +37,16 @@ test('toNavLibrary orders groups + lists and files unfiled into Ungrouped last',
     assert.deepEqual(l.groups[2].listIds, ['z'])
 })
 
+test('toNavLibrary carries baseKey on each list (null when absent)', () => {
+    const l = toNavLibrary(
+        { groups: [], lists: [{ id: 'p', name: 'Personal', type: 'shopping' }, { id: 's', name: 'Shared', type: 'shopping', baseKey: 'cafef00d' }] },
+        { extraLists: [{ id: 'z', name: 'Loose', type: 'shopping' }] },
+    )
+    assert.equal(l.listsById.p.baseKey, null)
+    assert.equal(l.listsById.s.baseKey, 'cafef00d')
+    assert.equal(l.listsById.z.baseKey, null)
+})
+
 test('flatten + locate report position within the group', () => {
     const l = lib()
     assert.deepEqual(flatten(l).map((e) => e.listId), ['a', 'b', 'c'])

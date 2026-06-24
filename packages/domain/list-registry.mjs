@@ -54,7 +54,12 @@ export function sanitizeView (view) {
 // Build the synced item that declares a LIST in the registry. Caller supplies
 // `updatedAt` (now()) — this module stays pure. `view` is optional; when given,
 // only sanitized presentation keys are stored under `regView`.
-export function buildListMetaItem ({ id, name, type, groupId = null, order = 0, view, updatedAt }) {
+//
+// `baseKey` points the list's ITEMS at a base: null/absent = this (personal)
+// base; a hex key = a shared single-list base (multi-base sharing). It is written
+// only when present, so existing single-base entries are unchanged and old peers
+// that ignore `regBaseKey` keep reducing the registry correctly.
+export function buildListMetaItem ({ id, name, type, groupId = null, order = 0, view, baseKey = null, updatedAt }) {
     const item = {
         id,
         listId: REGISTRY_LIST_ID,
@@ -70,6 +75,7 @@ export function buildListMetaItem ({ id, name, type, groupId = null, order = 0, 
         regOrder: numberOr(order, 0),
     }
     if (view && typeof view === 'object') item.regView = sanitizeView(view)
+    if (baseKey != null && String(baseKey)) item.regBaseKey = String(baseKey)
     return item
 }
 
@@ -125,6 +131,9 @@ export function reduceRegistry (items) {
                 groupId: item.regGroupId == null ? null : String(item.regGroupId),
                 order: numberOr(item.regOrder, 0),
                 view: (item.regView && typeof item.regView === 'object') ? sanitizeView(item.regView) : undefined,
+                // The base this list's items live in: null = the personal base;
+                // a hex key = a shared single-list base.
+                baseKey: typeof item.regBaseKey === 'string' && item.regBaseKey ? item.regBaseKey : null,
                 _at: updatedAt,
             })
         }

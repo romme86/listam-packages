@@ -23,11 +23,11 @@ export function toNavLibrary (registry, { extraLists = [], defaultListId = null,
 
     const listsById = {}
     for (const l of regLists) {
-        if (l && typeof l.id === 'string') listsById[l.id] = { id: l.id, name: l.name || '', type: l.type || '', groupId: l.groupId ?? null, order: numberOr(l.order, 0), view: l.view }
+        if (l && typeof l.id === 'string') listsById[l.id] = { id: l.id, name: l.name || '', type: l.type || '', groupId: l.groupId ?? null, order: numberOr(l.order, 0), view: l.view, baseKey: l.baseKey ?? null }
     }
     for (const l of (Array.isArray(extraLists) ? extraLists : [])) {
         if (l && typeof l.id === 'string' && !listsById[l.id]) {
-            listsById[l.id] = { id: l.id, name: l.name || '', type: l.type || '', groupId: null, order: numberOr(l.order, Number.MAX_SAFE_INTEGER), view: undefined }
+            listsById[l.id] = { id: l.id, name: l.name || '', type: l.type || '', groupId: null, order: numberOr(l.order, Number.MAX_SAFE_INTEGER), view: undefined, baseKey: l.baseKey ?? null }
         }
     }
 
