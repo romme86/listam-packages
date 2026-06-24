@@ -30,7 +30,7 @@ import {
     RPC_SET_BACKUP_PASSWORD
 } from '@listam/protocol'
 import b4a from 'b4a'
-import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, projectItemsToFrontend} from './lib/item.mjs'
+import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain} from './lib/item.mjs'
 import {
     applyOperationToList,
     createListViewEntry,
@@ -48,7 +48,10 @@ import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, can
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
-import { isPersonalContext } from './lib/base-context.mjs'
+import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
+import { createBaseManager } from './lib/base-manager.mjs'
+import { openSharedBase, closeSharedBase } from './lib/shared-base.mjs'
+import { reduceRegistry, isRegistryItem, REG_KIND_LIST } from './lib/list-registry.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
 import {
@@ -100,6 +103,20 @@ let lockPath = './lista.lock'
 let storageLease = null
 let platformFs = null
 let shutdownStarted = false
+
+// Single-list sharing (multi-base): the personal base above stays the primary;
+// `baseManager` owns the SHARED single-list bases opened alongside it. The
+// personal registry (list meta-items carrying `regBaseKey`) is the source of
+// truth for which shared bases this device should be in — reconcileSharedBases
+// diffs it against what's open. `_listIdToBaseKey` is the derived listId →
+// shared-base-key index used to route a write to the right base when the UI
+// did not tag the payload with an explicit baseKey.
+let baseManager = null
+const _listIdToBaseKey = new Map()
+let _reconcileTimer = null
+// resolveWriteContext sentinel: a shared base was named but is not open, so the
+// write must be refused rather than silently written to the personal base.
+const WRITE_REFUSED = Symbol('write-refused')
 
 export function createBackendPaths(platform, argv = platform.argv ?? []) {
     const join = platform.join
@@ -262,12 +279,23 @@ export async function startBackend(platform) {
         loadedOwnerAuthorityKeyPair,
     })
 
+    // Owns the SHARED single-list bases opened alongside the personal base.
+    // Constructed before initAutobase so a registry replay during init can
+    // schedule a reconcile against it.
+    baseManager = createBaseManager({
+        openShared: openSharedForManager,
+        closeShared: closeSharedForManager,
+    })
+
     await initAutobase(baseKey).then(() => {
         logger.log('[INFO] Autobase ready 123')
     }).catch((err) => {
         logger.log('[ERROR] initAutobase failed at startup:', err)
         throw err
     })
+
+    // Open any shared single-list bases the personal registry already references.
+    await reconcileSharedBases()
 
     const disposeTeardown = platform.onTeardown?.(shutdownBackend)
     return { paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown }
@@ -282,25 +310,47 @@ async function handleFrontendRequest(req, error) {
         switch (req.command) {
             case RPC_ADD: {
                 const payload = JSON.parse(b4a.toString(req.data))
-                const ok = typeof payload === 'string'
-                    ? await addItem(payload)
-                    : await addItem(payload?.text, payload?.listId, payload?.listType, payload)
-                replyMutationResult(req, ok)
+                if (typeof payload === 'string') {
+                    replyMutationResult(req, await addItem(payload))
+                    break
+                }
+                const route = resolveWriteContext(payload)
+                if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
+                replyMutationResult(req, await addItem(payload?.text, payload?.listId, payload?.listType, payload, route))
                 break
             }
             case RPC_UPDATE: {
                 const data = JSON.parse(req.data.toString())
-                replyMutationResult(req, await updateItem(data.item))
+                const route = resolveWriteContext(data.item)
+                if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
+                replyMutationResult(req, await updateItem(data.item, route))
                 break
             }
             case RPC_DELETE: {
                 const data = JSON.parse(req.data.toString())
-                replyMutationResult(req, await deleteItem(data.item))
+                const route = resolveWriteContext(data.item)
+                if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
+                replyMutationResult(req, await deleteItem(data.item, route))
                 break
             }
             case RPC_MOVE: {
                 const data = JSON.parse(req.data.toString())
-                replyMutationResult(req, await moveItem(data))
+                // A move is add(dest)+delete(source) on ONE base. Route by the
+                // SOURCE item's base. A cross-base move (source and destination
+                // in different bases) is not supported — refuse it rather than
+                // append the destination into the source base (silent misfile).
+                const route = resolveWriteContext(data.item)
+                if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
+                // The destination base is whatever the TARGET list maps to; if it
+                // differs from the source's base the move would land the copy in
+                // the wrong base, so refuse it.
+                const destRoute = resolveWriteContext({ listId: data.targetListId })
+                if (destRoute === WRITE_REFUSED || destRoute !== route) {
+                    logger.log('[WARNING] MOVE refused; cross-base moves are not supported')
+                    replyMutationResult(req, false)
+                    break
+                }
+                replyMutationResult(req, await moveItem(data, route))
                 break
             }
             case RPC_GET_KEY: {
@@ -589,6 +639,17 @@ export async function shutdownBackend() {
     shutdownStarted = true
 
     logger.log('[INFO] Backend shutting down...')
+
+    // Close every shared single-list base before the personal base.
+    if (_reconcileTimer) { clearTimeout(_reconcileTimer); _reconcileTimer = null }
+    if (baseManager) {
+        for (const ctx of baseManager.list()) {
+            try { await closeSharedBase(ctx) } catch (e) { logger.log('[ERROR] Error closing shared base:', e) }
+        }
+        _listIdToBaseKey.clear()
+        baseManager = null
+    }
+
     if (pairing) {
         try {
             await pairing.close()
@@ -723,6 +784,142 @@ function pushFromBackend (ctx, command, item) {
     }
 }
 
+// ---- Single-list sharing: shared-base manager + registry-driven reconcile ----
+
+function sharedStorageDir (baseKeyHex) {
+    return `${storagePath}/shared/${baseKeyHex}`
+}
+
+// Push a shared base's already-materialized items to the frontend, each tagged
+// with its baseKey so the UI routes them to that shared list's bucket (the
+// per-item analogue of projectItemsToFrontend, but base-tagged). Items that
+// arrive later via replication are pushed by apply()→pushFromBackend.
+function projectSharedListToFrontend (ctx) {
+    if (!rpc || !ctx || !Array.isArray(ctx.currentList)) return
+    const baseKeyHex = ctx.baseKey ? b4a.toString(ctx.baseKey, 'hex') : null
+    for (const item of ctx.currentList) {
+        if (!item) continue
+        try {
+            const payload = baseKeyHex ? { ...item, baseKey: baseKeyHex } : item
+            rpc.request(RPC_ADD_FROM_BACKEND).send(JSON.stringify(payload))
+        } catch (e) {
+            logger.log('[ERROR] Failed to project shared item to frontend:', e)
+        }
+    }
+}
+
+// Open a shared base into a fresh context and surface its current list. Returns
+// the context the manager tracks, or null on failure (reconcile then skips it).
+async function openSharedForManager (baseKeyHex) {
+    try {
+        const ctx = createBaseContext({ role: 'shared', baseId: baseKeyHex, baseKey: b4a.from(baseKeyHex, 'hex') })
+        await openSharedBase(ctx, {
+            baseKey: ctx.baseKey,
+            storageDir: sharedStorageDir(baseKeyHex),
+            bootstrap: swarmBootstrap,
+        })
+        projectSharedListToFrontend(ctx)
+        return ctx
+    } catch (e) {
+        logger.log('[ERROR] Failed to open shared base:', baseKeyHex?.slice?.(0, 16), e)
+        return null
+    }
+}
+
+async function closeSharedForManager (_baseKeyHex, ctx) {
+    if (!ctx) return
+    clearWriteChain(ctx) // release the closed base's per-base write chain
+    await closeSharedBase(ctx)
+}
+
+// Diff the personal registry's shared-base references against what's open and
+// open/close to converge. This is what auto-opens a device's shared lists on
+// boot and auto-joins them after a paired device syncs a new registry entry.
+async function reconcileSharedBases () {
+    if (!baseManager) return
+    // Only reconcile against a STABLE personal base. During an initAutobase
+    // teardown/switch the personal autobase is briefly null/closing and
+    // rebuildAllItems would return []; reconciling on that would wrongly clear
+    // the routing index and close every shared base. A re-init re-triggers a
+    // reconcile once the new base is ready (apply replay → scheduleReconcile,
+    // and the explicit boot reconcile).
+    if (!autobase || autobase.closing) return
+    try {
+        const registry = reduceRegistry(await rebuildAllItems())
+        // Refresh the listId → shared-base-key routing index used by writes.
+        _listIdToBaseKey.clear()
+        for (const list of registry.lists) {
+            if (list && list.baseKey) _listIdToBaseKey.set(list.id, list.baseKey)
+        }
+        const { opened, closed } = await baseManager.reconcile(registry)
+        if (opened.length || closed.length) {
+            logger.log('[INFO] Shared bases reconciled', { opened, closed, open: baseManager.keys().length })
+        }
+    } catch (e) {
+        logger.log('[ERROR] reconcileSharedBases failed:', e)
+    }
+}
+
+// Keep the listId → shared-base routing index in step with a registry change
+// the instant apply() linearizes it — closing the window between a registry
+// item arriving (which schedules an ASYNC reconcile) and a write for that list
+// being routed. Only list meta-items carry regBaseKey; a list with a regBaseKey
+// maps to its shared base. We never delete here on a tombstone/unshare — the
+// authoritative reconcile rebuilds the whole index — so the entry stays and the
+// write is REFUSED-if-closed rather than silently misrouted to the personal base.
+function indexRegistryItemRoute (item) {
+    if (!item || item.regKind !== REG_KIND_LIST) return
+    const id = typeof item.id === 'string' ? item.id : null
+    if (!id) return
+    if (item.regDeleted !== true && typeof item.regBaseKey === 'string' && item.regBaseKey) {
+        _listIdToBaseKey.set(id, item.regBaseKey)
+    }
+}
+
+// A base SWITCH (a destructive whole-project join replaces the personal base)
+// abandons the current project; its shared single-list bases belong to that
+// project, so close them and clear the routing index before the new base loads.
+// The new base's registry then drives a fresh reconcile. Called by initAutobase
+// only when it is replacing an existing base (never on first boot).
+export async function resetSharedBasesOnBaseSwitch () {
+    if (_reconcileTimer) { clearTimeout(_reconcileTimer); _reconcileTimer = null }
+    if (!baseManager) return
+    for (const key of baseManager.keys()) {
+        const ctx = baseManager.get(key)
+        if (ctx) {
+            try { clearWriteChain(ctx) } catch (e) { logger.log('[ERROR] base-switch clearWriteChain:', e) }
+            try { await closeSharedBase(ctx) } catch (e) { logger.log('[ERROR] base-switch close shared base:', e) }
+        }
+        baseManager.remove(key)
+    }
+    _listIdToBaseKey.clear()
+}
+
+// A registry change can arrive locally (an RPC) or from a peer (apply). Coalesce
+// bursts and run the reconcile OUTSIDE the apply() callback (deferred) so it
+// never re-enters the linearizer it was triggered from.
+function scheduleReconcileSharedBases () {
+    if (_reconcileTimer) return
+    _reconcileTimer = setTimeout(() => {
+        _reconcileTimer = null
+        reconcileSharedBases().catch((e) => logger.log('[ERROR] scheduled reconcile failed:', e))
+    }, 0)
+}
+
+// Decide which base a mutation targets. An explicit payload.baseKey wins;
+// otherwise the listId → shared-base index (from the personal registry's
+// regBaseKey) is consulted. A named-but-not-open base REFUSES the write rather
+// than letting it fall through to the personal base (which would file the item
+// in the wrong base). No key named → personal base (returns null).
+function resolveWriteContext (payload) {
+    if (!payload || typeof payload !== 'object') return null
+    const explicit = typeof payload.baseKey === 'string' && payload.baseKey ? payload.baseKey : null
+    const key = explicit || (payload.listId ? _listIdToBaseKey.get(payload.listId) : null) || null
+    if (!key) return null
+    const ctx = baseManager ? baseManager.get(key) : null
+    return ctx || WRITE_REFUSED
+}
+
 export async function apply (ctx, nodes, view, host) {
     if (ctx.autobase?.closing) {
         logger.log('[WARNING] Apply called while Autobase is closing; skipping.')
@@ -832,6 +1029,16 @@ export async function apply (ctx, nodes, view, host) {
 
         const operation = normalizeListOperation(unwrappedOperation)
         if (!operation) continue
+
+        // A change to the PERSONAL registry (a list shared/renamed/deleted) can
+        // add or remove a shared base. Update the write-routing index NOW (so a
+        // concurrent write for that list is not misrouted before the async
+        // reconcile runs), then schedule the open/close lifecycle. Only the
+        // personal base carries the registry; shared bases never do.
+        if (isPersonalContext(ctx) && isRegistryItem(operation.value)) {
+            indexRegistryItemRoute(operation.value)
+            scheduleReconcileSharedBases()
+        }
 
         if (operation.type === 'add') {
             if (!validateItem(operation.value)) {

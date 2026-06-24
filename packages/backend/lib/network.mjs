@@ -1,7 +1,7 @@
 import Hyperswarm from "hyperswarm"
 import BlindPairing from "blind-pairing"
 import z32 from "z32"
-import { apply, open, primaryContext, resetApplyMembershipCheckpoint, storagePath, peerKeysString, keyFilePath, encKeyFilePath, ownerAuthorityKeyFilePath, legacyInviteFilePath, recoveryPolicy, swarmBootstrap } from "../backend.mjs"
+import { apply, open, primaryContext, resetApplyMembershipCheckpoint, resetSharedBasesOnBaseSwitch, storagePath, peerKeysString, keyFilePath, encKeyFilePath, ownerAuthorityKeyFilePath, legacyInviteFilePath, recoveryPolicy, swarmBootstrap } from "../backend.mjs"
 import { saveAutobaseKey, saveEncryptionKey, saveOwnerAuthorityKey, deleteOwnerAuthorityKey, saveEpochKey, deleteEpochKey, saveEpochEncryptionKey, deleteEpochEncryptionKey, deleteLegacyInviteFile, deleteLegacyKeyFile } from "./key.mjs"
 import { deleteBackendSecret, secretFingerprint } from "./secrets.mjs"
 import { describeCorruption, isCorruptionSignature, planRecoveryAction, quarantineStorageRoot } from "./recovery.mjs"
@@ -518,6 +518,13 @@ export async function initAutobase(newBaseKey, options = {}) {
     const allowOwnerMigration = options.allowOwnerMigration !== false
 
     _initPromise = (async () => {
+
+        // Replacing a live personal base (e.g. a destructive whole-project join)
+        // abandons the current project; close its shared single-list bases first.
+        // On first boot there is no current base, so this is a no-op.
+        if (autobase) {
+            try { await resetSharedBasesOnBaseSwitch() } catch (e) { logger.log('[ERROR] reset shared bases on base switch:', e) }
+        }
 
         await tearDownAutobaseSwarmStore()
         setMembershipState(createMembershipState())

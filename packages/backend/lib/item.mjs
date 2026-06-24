@@ -17,7 +17,32 @@ import { isBoardType, applyStatusTransition, doneStatusesOf, validateTicketDraft
 import { buildMovedItem, isSameSurfaceMove } from './list-move.mjs'
 
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
-let _writeChain = Promise.resolve()
+// One write chain PER BASE. The personal base uses the '__personal__' chain
+// (byte-identical to the old single global chain — rekey.mjs serializes its
+// epoch rotation against personal list writes through it). Each shared base gets
+// its own chain keyed by baseId, so a shared base whose writer cannot flush
+// (its peers/DHT unreachable, see waitForFlushableWriter) stalls only its own
+// writes for FLUSHABLE_WAIT_MS instead of blocking the personal list too.
+const PERSONAL_CHAIN = '__personal__'
+const _writeChains = new Map()
+
+// A read-through view of the write target's state: the personal globals (live
+// bindings, so a concurrent initAutobase re-init is still observed) when no
+// shared ctx is given, or the shared BaseContext's own fields. apply() already
+// keeps each base's currentList/epochKey/membershipState/boardConfigState
+// independent, so this is just selecting which one a write reads.
+function ctxView (ctx) {
+    const shared = !!(ctx && ctx.role === 'shared')
+    return {
+        shared,
+        get autobase () { return shared ? ctx.autobase : autobase },
+        get epochKey () { return shared ? ctx.epochKey : epochKey },
+        get membershipState () { return shared ? ctx.membershipState : membershipState },
+        get boardConfigState () { return shared ? ctx.boardConfigState : boardConfigState },
+        get currentList () { return shared ? ctx.currentList : currentList },
+        get chainKey () { return shared ? (ctx.baseId || PERSONAL_CHAIN) : PERSONAL_CHAIN },
+    }
+}
 
 // autobase.append only completes once the local writer pipeline can flush the
 // new node, and when it cannot (writer not "idle", e.g. after a writer-set
@@ -30,12 +55,14 @@ let _writeChain = Promise.resolve()
 const FLUSHABLE_WAIT_MS = 4000
 const FLUSHABLE_POLL_MS = 200
 
-async function waitForFlushableWriter () {
+async function waitForFlushableWriter (view) {
+    const v = view || ctxView(null)
     const deadline = Date.now() + FLUSHABLE_WAIT_MS
     for (;;) {
-        if (!autobase || autobase.closing) return false
+        const ab = v.autobase
+        if (!ab || ab.closing) return false
         try {
-            const writer = autobase.localWriter
+            const writer = ab.localWriter
             if (writer && !writer.closed && writer.idle()) return true
         } catch {
             // localWriter.idle() is internal autobase API; if it changes shape,
@@ -48,7 +75,7 @@ async function waitForFlushableWriter () {
         // the local core after a writer-set reorg. With a reachable peer one
         // or two cycles settle it; without one it stays stalled and we refuse.
         try {
-            await autobase.update()
+            await ab.update()
         } catch (e) {
             logger.log('[WARNING] autobase.update failed while waiting for flushable writer:', e?.message ?? e)
         }
@@ -71,10 +98,25 @@ function refuseStalledMutation (operationType) {
 // epoch-rotation appends against list writes through the same chain — otherwise
 // a concurrent addItem could land between the epoch flip and the re-encrypted
 // snapshot and be tagged with a mismatched epoch.
-export function enqueueWrite (fn) {
-    // ensures writes run one-at-a-time even if RPC calls arrive concurrently
-    _writeChain = _writeChain.then(fn, fn)
-    return _writeChain
+export function enqueueWrite (fn, ctx) {
+    // ensures writes run one-at-a-time even if RPC calls arrive concurrently.
+    // Per-base chain so a stalled shared base never serializes behind/ahead of
+    // personal writes. No ctx (rekey.mjs, personal callers) → the personal chain.
+    const key = ctxView(ctx).chainKey
+    const prev = _writeChains.get(key) || Promise.resolve()
+    const next = prev.then(fn, fn)
+    _writeChains.set(key, next)
+    return next
+}
+
+// Drop a closed shared base's write chain. Without this the settled Promise —
+// and the closure that retains the closed base's ctx/autobase/store — would
+// live in _writeChains forever (a leak across open/close cycles), and a base
+// reopened with the same id would inherit its predecessor's settled chain. The
+// personal chain ('__personal__') is never dropped.
+export function clearWriteChain (ctx) {
+    const key = ctxView(ctx).chainKey
+    if (key !== PERSONAL_CHAIN) _writeChains.delete(key)
 }
 
 // Fields a client may supply when creating a board ticket. Server-controlled
@@ -90,28 +132,29 @@ function pickTicketExtra (extra) {
     return out
 }
 
-function localWriterKeyHex () {
+function localWriterKeyHex (ab = autobase) {
     try {
-        return autobase?.local?.key ? autobase.local.key.toString('hex') : null
+        return ab?.local?.key ? ab.local.key.toString('hex') : null
     } catch {
         return null
     }
 }
 
-function findCurrentItem (item) {
-    if (!Array.isArray(currentList)) return null
+function findCurrentItem (item, list = currentList) {
+    if (!Array.isArray(list)) return null
     const id = item?.id
     if (!id) return null
-    return currentList.find((entry) => entry && entry.id === id) || null
+    return list.find((entry) => entry && entry.id === id) || null
 }
 
-export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAULT_LIST_TYPE, extra = null) {
-    if (!autobase) {
+export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAULT_LIST_TYPE, extra = null, ctx = null) {
+    const v = ctxView(ctx)
+    if (!v.autobase) {
         logger.log('[WARNING] addItem called before Autobase is initialized')
         return false
     }
 
-    if (!autobase.writable) {
+    if (!v.autobase.writable) {
         logger.log('[WARNING] addItem called but autobase is not writable yet - waiting to be added as writer')
         // Notify frontend about not being writable
         try {
@@ -148,7 +191,7 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
         item.isDone = item.status === 'done'
         if (typeof item.inProgressMs !== 'number') item.inProgressMs = 0
         item.inProgressSince = item.status === 'in_progress' ? now : null
-        const createdBy = localWriterKeyHex()
+        const createdBy = localWriterKeyHex(v.autobase)
         if (createdBy) item.createdBy = createdBy
     }
 
@@ -156,16 +199,16 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
     if (!op) return false
 
     return enqueueWrite(async () => {
-        if (!autobase) return false
-        if (autobase.closing) {
+        if (!v.autobase) return false
+        if (v.autobase.closing) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
-        if (!(await waitForFlushableWriter())) return refuseStalledMutation('ADD')
+        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('ADD')
         // Get length before append to verify it increases
-        // const lengthBefore = autobase.local.length
+        // const lengthBefore = v.autobase.local.length
 
-        await autobase.append(prepareListAppendOperation(op))
+        await v.autobase.append(prepareListAppendOperation(op, v))
 
         // Flush to disk and verify persistence
         // const persisted = await persistAndVerify(lengthBefore + 1, 'ADD')
@@ -175,17 +218,18 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
 
         logger.log('[INFO] Added item')
         return true
-    })
+    }, ctx)
 }
 
 // Update item operation: AUTONOMOUS, NO BACKEND MEMORY
-export async function updateItem (item) {
-    if (!autobase) {
+export async function updateItem (item, ctx = null) {
+    const v = ctxView(ctx)
+    if (!v.autobase) {
         logger.log('[WARNING] updateItem called before Autobase is initialized')
         return false
     }
 
-    if (!autobase.writable) {
+    if (!v.autobase.writable) {
         logger.log('[WARNING] updateItem called but autobase is not writable yet')
         try {
             const req = rpc.request(RPC_MESSAGE)
@@ -204,24 +248,24 @@ export async function updateItem (item) {
         // Freeze time-in-progress and the on-time verdict at the source writer,
         // so every peer receives the same computed values rather than each
         // recomputing from another peer's clock.
-        nextItem = applyStatusTransition(findCurrentItem(item), nextItem, now, {
-            writerKey: localWriterKeyHex(),
-            doneStatuses: doneStatusesOf(boardConfigState?.config),
+        nextItem = applyStatusTransition(findCurrentItem(item, v.currentList), nextItem, now, {
+            writerKey: localWriterKeyHex(v.autobase),
+            doneStatuses: doneStatusesOf(v.boardConfigState?.config),
         })
     }
     const op = createListOperation('update', nextItem)
     if (!op) return false
 
     return enqueueWrite(async () => {
-        if (!autobase) return false
-        if (autobase.closing) {
+        if (!v.autobase) return false
+        if (v.autobase.closing) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
-        if (!(await waitForFlushableWriter())) return refuseStalledMutation('UPDATE')
-        const lengthBefore = autobase.local.length
+        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('UPDATE')
+        const lengthBefore = v.autobase.local.length
 
-        await autobase.append(prepareListAppendOperation(op))
+        await v.autobase.append(prepareListAppendOperation(op, v))
 
         // const persisted = await persistAndVerify(lengthBefore + 1, 'UPDATE')
         // if (!persisted) {
@@ -230,17 +274,18 @@ export async function updateItem (item) {
 
         logger.log('[INFO] Updated item')
         return true
-    })
+    }, ctx)
 }
 
 // Delete item operation: AUTONOMOUS, NO BACKEND MEMORY
-export async function deleteItem (item) {
-    if (!autobase) {
+export async function deleteItem (item, ctx = null) {
+    const v = ctxView(ctx)
+    if (!v.autobase) {
         logger.log('[WARNING] deleteItem called before Autobase is initialized')
         return false
     }
 
-    if (!autobase.writable) {
+    if (!v.autobase.writable) {
         logger.log('[WARNING] deleteItem called but autobase is not writable yet')
         try {
             const req = rpc.request(RPC_MESSAGE)
@@ -257,15 +302,15 @@ export async function deleteItem (item) {
     if (!op) return false
 
     return enqueueWrite(async () => {
-        if (!autobase) return false
-        if (autobase.closing) {
+        if (!v.autobase) return false
+        if (v.autobase.closing) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
-        if (!(await waitForFlushableWriter())) return refuseStalledMutation('DELETE')
-        const lengthBefore = autobase.local.length
+        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('DELETE')
+        const lengthBefore = v.autobase.local.length
 
-        await autobase.append(prepareListAppendOperation(op))
+        await v.autobase.append(prepareListAppendOperation(op, v))
 
         // const persisted = await persistAndVerify(lengthBefore + 1, 'DELETE')
         // if (!persisted) {
@@ -274,7 +319,7 @@ export async function deleteItem (item) {
 
         logger.log('[INFO] Deleted item')
         return true
-    })
+    }, ctx)
 }
 
 // Move a single item to a different list and/or type WITHIN this project.
@@ -290,13 +335,14 @@ export async function deleteItem (item) {
 //     duplicate rather than losing the item.
 // Both forms are ordinary add/update/delete ops, so apply() and old peers need
 // no new operation type.
-export async function moveItem (payload) {
-    if (!autobase) {
+export async function moveItem (payload, ctx = null) {
+    const v = ctxView(ctx)
+    if (!v.autobase) {
         logger.log('[WARNING] moveItem called before Autobase is initialized')
         return false
     }
 
-    if (!autobase.writable) {
+    if (!v.autobase.writable) {
         logger.log('[WARNING] moveItem called but autobase is not writable yet')
         try {
             const req = rpc.request(RPC_MESSAGE)
@@ -319,7 +365,7 @@ export async function moveItem (payload) {
     const dest = buildMovedItem(source, payload?.targetListId, payload?.targetListType, {
         fields: payload?.fields ?? null,
         now,
-        writerKey: localWriterKeyHex(),
+        writerKey: localWriterKeyHex(v.autobase),
     })
 
     // Rigor pre-check. apply() SILENTLY DROPS a board add that fails the rigor
@@ -328,8 +374,8 @@ export async function moveItem (payload) {
     // the update branch which has no apply()-side gate, so this is the only
     // enforcement there. Refuse the whole move up front and tell the frontend so
     // it can collect the required ticket fields.
-    if (isBoardType(dest.listType) && boardConfigState?.config?.rigorOn) {
-        const check = validateTicketDraft(dest, boardConfigState.config)
+    if (isBoardType(dest.listType) && v.boardConfigState?.config?.rigorOn) {
+        const check = validateTicketDraft(dest, v.boardConfigState.config)
         if (!check || !check.ok) {
             logger.log('[WARNING] MOVE refused; destination board rigor gate unmet; missing:', check?.missing)
             try {
@@ -352,23 +398,23 @@ export async function moveItem (payload) {
     }
 
     return enqueueWrite(async () => {
-        if (!autobase) return false
-        if (autobase.closing) {
+        if (!v.autobase) return false
+        if (v.autobase.closing) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
-        if (!(await waitForFlushableWriter())) return refuseStalledMutation('MOVE')
+        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('MOVE')
 
         if (sameBucket) {
-            await autobase.append(prepareListAppendOperation(updateOp))
+            await v.autobase.append(prepareListAppendOperation(updateOp, v))
         } else {
-            await autobase.append(prepareListAppendOperation(addOp))
-            await autobase.append(prepareListAppendOperation(deleteOp))
+            await v.autobase.append(prepareListAppendOperation(addOp, v))
+            await v.autobase.append(prepareListAppendOperation(deleteOp, v))
         }
 
         logger.log('[INFO] Moved item', { id: dest.id, from: source.listId, to: dest.listId, sameBucket })
         return true
-    })
+    }, ctx)
 }
 
 // Simple inline schema validation matching the mobile ListEntry
@@ -388,10 +434,15 @@ export function syncListToFrontend (list = currentList) {
     }
 }
 
-export function prepareListAppendOperation(op) {
-    const currentEpoch = Number(membershipState?.currentEpoch) || 0
-    if (!epochKey || currentEpoch <= 0) return op
-    return createEncryptedListOperation(op, epochKey, currentEpoch) || op
+// `view` (from ctxView) selects which base's epoch/membership encrypts the op;
+// callers without one (network.mjs, rekey.mjs) read the personal globals, so the
+// personal path is unchanged.
+export function prepareListAppendOperation(op, view) {
+    const ek = view ? view.epochKey : epochKey
+    const ms = view ? view.membershipState : membershipState
+    const currentEpoch = Number(ms?.currentEpoch) || 0
+    if (!ek || currentEpoch <= 0) return op
+    return createEncryptedListOperation(op, ek, currentEpoch) || op
 }
 
 // Persist and verify that an operation was written to disk
