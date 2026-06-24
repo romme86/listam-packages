@@ -1,7 +1,7 @@
 import Hyperswarm from "hyperswarm"
 import BlindPairing from "blind-pairing"
 import z32 from "z32"
-import { apply, open, resetApplyMembershipCheckpoint, storagePath, peerKeysString, keyFilePath, encKeyFilePath, ownerAuthorityKeyFilePath, legacyInviteFilePath, recoveryPolicy, swarmBootstrap } from "../backend.mjs"
+import { apply, open, primaryContext, resetApplyMembershipCheckpoint, storagePath, peerKeysString, keyFilePath, encKeyFilePath, ownerAuthorityKeyFilePath, legacyInviteFilePath, recoveryPolicy, swarmBootstrap } from "../backend.mjs"
 import { saveAutobaseKey, saveEncryptionKey, saveOwnerAuthorityKey, deleteOwnerAuthorityKey, saveEpochKey, deleteEpochKey, saveEpochEncryptionKey, deleteEpochEncryptionKey, deleteLegacyInviteFile, deleteLegacyKeyFile } from "./key.mjs"
 import { deleteBackendSecret, secretFingerprint } from "./secrets.mjs"
 import { describeCorruption, isCorruptionSignature, planRecoveryAction, quarantineStorageRoot } from "./recovery.mjs"
@@ -563,7 +563,11 @@ export async function initAutobase(newBaseKey, options = {}) {
         }
 
         const autobaseOpts = {
-            apply, open,
+            // The personal base reduces through the shared apply(), bound to the
+            // primaryContext adapter (state.mjs globals). Shared single-list bases
+            // bind apply() to their own BaseContext instead.
+            apply: (nodes, view, host) => apply(primaryContext, nodes, view, host),
+            open,
             valueEncoding: 'json',
             encrypt: true,
             encryptionKey: encryptionKey || undefined,

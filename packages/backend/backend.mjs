@@ -684,26 +684,45 @@ export function resetApplyMembershipCheckpoint() {
     applyMembershipCheckpoint.reset()
 }
 
-export async function apply (nodes, view, host) {
-    if (autobase?.closing) {
+// The personal (primary) base's context: a thin ADAPTER over the single global
+// state in state.mjs, so apply() can be written context-aware while the personal
+// base behaves EXACTLY as before (the getters/setters read/write the same live
+// globals). Shared single-list bases instead pass their own createBaseContext()
+// object — same shape, independent per-base state. `role: 'personal'` marks this
+// adapter so apply leaves the personal base's frontend pushes untagged.
+export const primaryContext = {
+    role: 'personal',
+    get autobase () { return autobase },
+    get membershipState () { return membershipState },
+    setMembershipState,
+    get boardConfigState () { return boardConfigState },
+    setBoardConfigState,
+    get currentList () { return currentList },
+    setCurrentList,
+    setEpochKey,
+    applyMembershipCheckpoint,
+}
+
+export async function apply (ctx, nodes, view, host) {
+    if (ctx.autobase?.closing) {
         logger.log('[WARNING] Apply called while Autobase is closing; skipping.')
         return
     }
     logger.log('[INFO] Apply started')
 
-    const { membershipRecords, boardConfigRecords } = await applyMembershipCheckpoint.update(view)
-    setMembershipState(reduceMembershipLog(membershipRecords, { baseKey: autobase?.key }))
-    setBoardConfigState(reduceBoardConfigLog(boardConfigRecords, {
-        baseKey: autobase?.key,
-        ownerAuthorityKey: membershipState.ownerAuthorityKey,
+    const { membershipRecords, boardConfigRecords } = await ctx.applyMembershipCheckpoint.update(view)
+    ctx.setMembershipState(reduceMembershipLog(membershipRecords, { baseKey: ctx.autobase?.key }))
+    ctx.setBoardConfigState(reduceBoardConfigLog(boardConfigRecords, {
+        baseKey: ctx.autobase?.key,
+        ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
     }))
 
     for (const { value } of nodes) {
         if (!value) continue
 
         if (isMembershipRecord(value)) {
-            const result = reduceMembershipOperation(value, membershipState, { baseKey: autobase?.key })
-            setMembershipState(result.state)
+            const result = reduceMembershipOperation(value, ctx.membershipState, { baseKey: ctx.autobase?.key })
+            ctx.setMembershipState(result.state)
             if (!result.ok) {
                 logger.log('[WARNING] Rejected membership op', { reason: result.reason })
                 continue
@@ -746,8 +765,8 @@ export async function apply (nodes, view, host) {
                     })
                     notifyFrontend({ type: 'member-removal-incomplete', writerKey: result.effect.removeWriterKey, reason: outcome.reason })
                 }
-                if (autobase?.local?.key?.toString('hex') === result.effect.removeWriterKey) {
-                    setEpochKey(null)
+                if (ctx.autobase?.local?.key?.toString('hex') === result.effect.removeWriterKey) {
+                    ctx.setEpochKey(null)
                     await deleteEpochKey()
                     logger.log('[AUDIT] Local writer was removed; retired local epoch key')
                 }
@@ -764,11 +783,11 @@ export async function apply (nodes, view, host) {
             // Only the board creator's signature can change the config (verified
             // against the membership owner authority). Persist accepted records
             // into the view so the reduced config survives a restart/reorg.
-            const result = reduceBoardConfigOperation(value, boardConfigState, {
-                baseKey: autobase?.key,
-                ownerAuthorityKey: membershipState.ownerAuthorityKey,
+            const result = reduceBoardConfigOperation(value, ctx.boardConfigState, {
+                baseKey: ctx.autobase?.key,
+                ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
             })
-            setBoardConfigState(result.state)
+            ctx.setBoardConfigState(result.state)
             if (!result.ok) {
                 logger.log('[WARNING] Rejected board-config op', { reason: result.reason })
                 continue
@@ -802,8 +821,8 @@ export async function apply (nodes, view, host) {
             // cluster-wide enforcement behind the frontend's create form — the
             // reduced config is deterministic across peers at this point in
             // linearized history, and the default config is rigor ON.
-            if (isBoardType(operation.value.listType) && boardConfigState?.config?.rigorOn) {
-                const check = validateTicketDraft(operation.value, boardConfigState.config)
+            if (isBoardType(operation.value.listType) && ctx.boardConfigState?.config?.rigorOn) {
+                const check = validateTicketDraft(operation.value, ctx.boardConfigState.config)
                 if (!check.ok) {
                     logger.log('[WARNING] Dropped non-rigor board add (rigor mode on); missing:', check.missing)
                     continue
@@ -811,7 +830,7 @@ export async function apply (nodes, view, host) {
             }
             logger.log('[INFO] Applying add operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
-            setCurrentList(applyOperationToList(currentList, operation))
+            ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
             const addReq = rpc.request(RPC_ADD_FROM_BACKEND)
             addReq.send(JSON.stringify(operation.value))
             continue
@@ -824,7 +843,7 @@ export async function apply (nodes, view, host) {
             }
             logger.log('[INFO] Applying delete operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
-            setCurrentList(applyOperationToList(currentList, operation))
+            ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
             const deleteReq = rpc.request(RPC_DELETE_FROM_BACKEND)
             deleteReq.send(JSON.stringify(operation.value))
             continue
@@ -837,7 +856,7 @@ export async function apply (nodes, view, host) {
             }
             logger.log('[INFO] Applying update operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
-            setCurrentList(applyOperationToList(currentList, operation))
+            ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
             const updateReq = rpc.request(RPC_UPDATE_FROM_BACKEND)
             updateReq.send(JSON.stringify(operation.value))
             continue
@@ -850,8 +869,8 @@ export async function apply (nodes, view, host) {
             }
             logger.log('[INFO] Applying list operation for items:', operation.value)
             await view.append(createListViewEntry(operation))
-            const nextList = applyOperationToList(currentList, operation)
-            setCurrentList(nextList)
+            const nextList = applyOperationToList(ctx.currentList, operation)
+            ctx.setCurrentList(nextList)
             const updateReq = rpc.request(SYNC_LIST)
             updateReq.send(JSON.stringify(nextList))
             continue
