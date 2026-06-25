@@ -2,6 +2,7 @@
 // snapshot back into list operations. No autobase / crypto / IO here — the
 // orchestrator (backup.mjs) wires these to live state.
 import { createListOperation } from './list-reducer.mjs'
+import { isInternalChannelItem } from './shared-creds.mjs'
 
 export const BACKUP_DATA_VERSION = 1
 export const BACKUP_SEED_VERSION = 1
@@ -25,11 +26,15 @@ function isItem(value) {
 
 // Build the content snapshot. `items` is the full materialized item set across
 // every list (registry meta-items are ordinary entries with
-// listType==='registry', so they ride along untouched).
+// listType==='registry', so they ride along untouched). The internal
+// cross-device-sync channels (shared-base credentials / write requests) are
+// EXCLUDED — they are transient key material, not user data, and re-propagate
+// from the live personal base; keeping them out of the backup file is
+// defense-in-depth for the credentials they carry.
 export function buildDataSnapshot({ items = [], boardConfig = null } = {}) {
     return {
         snapshotVersion: BACKUP_DATA_VERSION,
-        items: Array.isArray(items) ? items.filter(isItem) : [],
+        items: Array.isArray(items) ? items.filter((it) => isItem(it) && !isInternalChannelItem(it)) : [],
         boardConfig: boardConfig && typeof boardConfig === 'object' ? boardConfig : null,
     }
 }

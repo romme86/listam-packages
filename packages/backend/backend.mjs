@@ -52,10 +52,11 @@ import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/bo
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
-import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView, persistSharedSecrets } from './lib/shared-base.mjs'
+import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView, persistSharedSecrets, autoOpenSharedBase, authorizeWriterOnSharedBase } from './lib/shared-base.mjs'
 import { reduceRegistry, isRegistryItem, REG_KIND_LIST, buildListMetaItem } from './lib/list-registry.mjs'
+import { isInternalChannelItem, buildSharedCredItem, reduceSharedCreds, buildSharedJoinReqItem, reduceSharedJoinReqs } from './lib/shared-creds.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
-import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
+import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, epochPublicKeyHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
 import {
     autobase,
     store,
@@ -115,6 +116,11 @@ let shutdownStarted = false
 // did not tag the payload with an explicit baseKey.
 let baseManager = null
 const _listIdToBaseKey = new Map()
+// Cross-device auto-join: baseKeyHex → propagated READ credentials ({encKey,
+// epochKey}) for shared bases referenced by the personal registry that this
+// device has not joined locally. Refreshed by reconcileSharedBases from the
+// __sharedcreds__ channel; consumed by openSharedForManager to auto-open them.
+const _sharedCredsByBaseKey = new Map()
 let _reconcileTimer = null
 // resolveWriteContext sentinel: a shared base was named but is not open, so the
 // write must be refused rather than silently written to the personal base.
@@ -883,18 +889,28 @@ function projectSharedListToFrontend (ctx) {
 }
 
 // reconcile() asks the manager to open a registry-referenced shared base that is
-// not already open. Within a session, shareList/joinList register their ctx
-// directly, so this fires on COLD BOOT (reopen a base joined in a past session)
-// and for a paired device's would-be AUTO-JOIN. Reopen works for bases this
-// device has LOCALLY (an index entry + per-base secrets on disk); a base only
-// referenced by the synced registry (never joined here) is skipped — credential
-// propagation for cross-device auto-join without an invite is not wired yet.
+// not already open. Three cases:
+//  - LOCAL (an index entry + per-base secrets on disk): a base shared/joined in a
+//    past session — reopen it.
+//  - AUTO-JOIN (no local copy, but the __sharedcreds__ channel carried its read
+//    credentials from a paired device): open it read-only and request write
+//    access. This is cross-device auto-join — your shared lists follow you.
+//  - neither: skip (we can't open a base we have no key for).
 async function openSharedForManager (baseKeyHex) {
     const dirName = loadSharedIndex()[baseKeyHex]
-    if (!dirName) {
-        logger.log('[INFO] Shared base in registry but not local (never joined here); cross-device auto-join not wired — skipping', baseKeyHex?.slice?.(0, 16))
-        return null
-    }
+    const ctx = dirName ? await reopenLocalSharedBase(baseKeyHex, dirName) : await autoJoinSharedForManager(baseKeyHex)
+    if (!ctx) return null
+    // Owner: re-arm the pairing listener so it keeps accepting invite joiners.
+    if (canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair)) setupSharedPairing(ctx)
+    // Not yet a writer and not the owner ⇒ ask the owner to authorize us (the
+    // write half of cross-device auto-join). Idempotent (LWW request item).
+    else if (!ctx.autobase.writable) await requestSharedWriteAccess(ctx)
+    projectSharedListToFrontend(ctx)
+    broadcastMembershipRoster(ctx)
+    return ctx
+}
+
+async function reopenLocalSharedBase (baseKeyHex, dirName) {
     const storageDir = sharedStorageDir(dirName)
     // The index can drift from disk (dir deleted / lost). Opening a fresh empty
     // Corestore there would silently present a blank, editable list (data loss).
@@ -908,26 +924,77 @@ async function openSharedForManager (baseKeyHex) {
     try {
         ctx = createBaseContext({ role: 'shared', baseId: baseKeyHex, baseKey: b4a.from(baseKeyHex, 'hex') })
         await openSharedBase(ctx, { baseKey: ctx.baseKey, storageDir, bootstrap: swarmBootstrap })
-        // A real shared base ALWAYS has an epoch (bootstrap epoch 1, or the
-        // invite's). No epoch key after reopen ⇒ the per-base secrets are
-        // missing/corrupt; reopening would skip every encrypted op (silent
-        // divergence) and the owner could not mint invites. Skip instead.
+        // A real shared base ALWAYS has an epoch (bootstrap epoch 1, or a joined
+        // one). No epoch key after reopen ⇒ the per-base secrets are missing/
+        // corrupt; reopening would skip every encrypted op (silent divergence).
         if (!ctx.epochKey) {
             logger.log('[ERROR] Reopened shared base has no epoch key (secrets missing/corrupt); skipping', baseKeyHex.slice(0, 16))
             await closeSharedBase(ctx)
             return null
         }
-        // Owner: re-arm the pairing listener so it keeps accepting joiners after
-        // a restart (its authority/epoch were restored from disk by openSharedBase).
-        if (canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair)) setupSharedPairing(ctx)
-        projectSharedListToFrontend(ctx)
-        broadcastMembershipRoster(ctx) // the UI must learn the rebuilt membership/owner state
         logger.log('[INFO] Reopened shared base on boot', { baseKey: baseKeyHex.slice(0, 16), writable: ctx.autobase.writable })
         return ctx
     } catch (e) {
         logger.log('[ERROR] Failed to reopen shared base:', baseKeyHex?.slice?.(0, 16), e)
         if (ctx) { try { await closeSharedBase(ctx) } catch (_) {} }
         return null
+    }
+}
+
+// Cross-device auto-join (no invite): open a registry-referenced base read-only
+// using the credentials a paired device propagated via __sharedcreds__.
+async function autoJoinSharedForManager (baseKeyHex) {
+    const creds = _sharedCredsByBaseKey.get(baseKeyHex)
+    // Need BOTH the encryption key (to open) and the epoch key (to decrypt); an
+    // incomplete bundle would open an undecryptable base, so skip until it syncs.
+    if (!creds || !creds.encKey || !creds.epochKey) {
+        logger.log('[INFO] Shared base in registry but no local copy and no/incomplete propagated creds — skipping', baseKeyHex?.slice?.(0, 16))
+        return null
+    }
+    try {
+        // The joining device knows the base key up front, so name its dir by it.
+        const { ctx } = await autoOpenSharedBase(createBaseContext, {
+            baseKeyHex,
+            creds,
+            storageDir: sharedStorageDir(baseKeyHex),
+            bootstrap: swarmBootstrap,
+        })
+        recordSharedBaseDir(baseKeyHex, baseKeyHex)
+        logger.log('[INFO] Auto-joined shared base from propagated creds', { baseKey: baseKeyHex.slice(0, 16), writable: ctx.autobase.writable })
+        return ctx
+    } catch (e) {
+        logger.log('[ERROR] Auto-join shared base failed:', baseKeyHex?.slice?.(0, 16), e)
+        return null
+    }
+}
+
+// Record (idempotently) a write-access request for an auto-opened base in the
+// personal base, so the owner device authorizes our writer key on its reconcile.
+async function requestSharedWriteAccess (ctx) {
+    try {
+        const writerKey = ctx.autobase?.local?.key ? b4a.toString(ctx.autobase.local.key, 'hex') : null
+        if (!writerKey) return
+        const epochPublicKey = ctx.epochEncryptionKeyPair ? epochPublicKeyHex(ctx.epochEncryptionKeyPair) : null
+        await updateItem(buildSharedJoinReqItem({ baseKey: ctx.baseId, writerKey, epochPublicKey, updatedAt: Date.now() }))
+        logger.log('[INFO] Requested cross-device write access', { baseKey: ctx.baseId.slice(0, 16) })
+    } catch (e) {
+        logger.log('[ERROR] requestSharedWriteAccess failed:', e)
+    }
+}
+
+// Owner side: authorize any pending write-access requests for the shared bases
+// this device owns and has open. Runs on every reconcile (a synced request item
+// triggers one). Single authorizer per base ⇒ clean membership sequencing.
+async function authorizePendingJoinRequests (joinReqs) {
+    if (!baseManager || !Array.isArray(joinReqs) || joinReqs.length === 0) return
+    for (const ctx of baseManager.list()) {
+        if (!ctx?.autobase?.writable) continue
+        if (!canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair)) continue
+        for (const req of joinReqs) {
+            if (req.baseKey !== ctx.baseId) continue
+            if (ctx.membershipState.writers.has(req.writerKey)) continue
+            await authorizeWriterOnSharedBase(ctx, { writerKey: req.writerKey, epochPublicKey: req.epochPublicKey })
+        }
     }
 }
 
@@ -959,16 +1026,24 @@ async function doReconcileSharedBases () {
     // and the explicit boot reconcile).
     if (!autobase || autobase.closing) return
     try {
-        const registry = reduceRegistry(await rebuildAllItems())
+        const personalItems = await rebuildAllItems()
+        const registry = reduceRegistry(personalItems)
         // Refresh the listId → shared-base-key routing index used by writes.
         _listIdToBaseKey.clear()
         for (const list of registry.lists) {
             if (list && list.baseKey) _listIdToBaseKey.set(list.id, list.baseKey)
         }
+        // Refresh propagated read-credentials (drives cross-device auto-open).
+        _sharedCredsByBaseKey.clear()
+        for (const [baseKey, creds] of reduceSharedCreds(personalItems)) _sharedCredsByBaseKey.set(baseKey, creds)
+
         const { opened, closed } = await baseManager.reconcile(registry)
         if (opened.length || closed.length) {
             logger.log('[INFO] Shared bases reconciled', { opened, closed, open: baseManager.keys().length })
         }
+        // Owner side: authorize any pending cross-device write-access requests for
+        // the bases we own (the write half of auto-join).
+        await authorizePendingJoinRequests(reduceSharedJoinReqs(personalItems))
     } catch (e) {
         logger.log('[ERROR] reconcileSharedBases failed:', e)
     }
@@ -1102,6 +1177,17 @@ async function shareList (listId) {
     for (const item of items) {
         try { await deleteItem(item) } catch (e) { logger.log('[ERROR] share-list tombstone:', e) }
     }
+    // Propagate this base's READ credentials through the personal base so YOUR
+    // OTHER devices auto-open (and, once authorized, co-edit) the list without an
+    // invite. Best-effort; the explicit invite path works regardless.
+    try {
+        await updateItem(buildSharedCredItem({
+            baseKey: baseKeyHex,
+            encKey: ctx.encryptionKey ? b4a.toString(ctx.encryptionKey, 'hex') : null,
+            epochKey: ctx.epochKey ? b4a.toString(ctx.epochKey, 'hex') : null,
+            updatedAt: Date.now(),
+        }))
+    } catch (e) { logger.log('[ERROR] share-list creds propagation:', e) }
     projectSharedListToFrontend(ctx)
     broadcastMembershipRoster(ctx) // the owner can administer this shared list
     const invite = createSharedInvite(ctx) || null
@@ -1148,6 +1234,21 @@ async function joinList (invite) {
             clearWriteChain(ctx)
             await closeSharedBase(ctx)
             return { ok: false, reason: 'join-timeout' }
+        }
+
+        // listId-collision guard: if this id already names a DIFFERENT list in
+        // your registry (a personal list, or another shared base), joining would
+        // collide — the registry and items key by listId. Refuse rather than
+        // corrupt. (True re-id with item remapping is a follow-up; re-joining the
+        // SAME base is fine — its baseKey matches.)
+        const clash = reduceRegistry(await rebuildAllItems()).lists
+            .find((l) => l.id === identity.listId && (l.baseKey || null) !== baseKeyHex)
+        if (clash) {
+            logger.log('[WARNING] join-list refused; listId already in use by another list', { listId: identity.listId })
+            baseManager.remove(baseKeyHex)
+            clearWriteChain(ctx)
+            await closeSharedBase(ctx)
+            return { ok: false, reason: 'list-id-conflict' }
         }
 
         _listIdToBaseKey.set(identity.listId, baseKeyHex)
@@ -1295,6 +1396,12 @@ export async function apply (ctx, nodes, view, host) {
             indexRegistryItemRoute(operation.value)
             scheduleReconcileSharedBases()
         }
+        // Cross-device auto-join channels (propagated read-creds / write-access
+        // requests) ride the personal base but are NEVER shown in the UI — they
+        // only drive a reconcile (auto-open a sibling's shared base, or authorize
+        // a requester). `internalItem` suppresses the frontend push below.
+        const internalItem = isInternalChannelItem(operation.value)
+        if (isPersonalContext(ctx) && internalItem) scheduleReconcileSharedBases()
 
         if (operation.type === 'add') {
             if (!validateItem(operation.value)) {
@@ -1316,7 +1423,7 @@ export async function apply (ctx, nodes, view, host) {
             logger.log('[INFO] Applying add operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
             ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
-            pushFromBackend(ctx, RPC_ADD_FROM_BACKEND, operation.value)
+            if (!internalItem) pushFromBackend(ctx, RPC_ADD_FROM_BACKEND, operation.value)
             continue
         }
 
@@ -1328,7 +1435,7 @@ export async function apply (ctx, nodes, view, host) {
             logger.log('[INFO] Applying delete operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
             ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
-            pushFromBackend(ctx, RPC_DELETE_FROM_BACKEND, operation.value)
+            if (!internalItem) pushFromBackend(ctx, RPC_DELETE_FROM_BACKEND, operation.value)
             continue
         }
 
@@ -1340,7 +1447,7 @@ export async function apply (ctx, nodes, view, host) {
             logger.log('[INFO] Applying update operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
             ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
-            pushFromBackend(ctx, RPC_UPDATE_FROM_BACKEND, operation.value)
+            if (!internalItem) pushFromBackend(ctx, RPC_UPDATE_FROM_BACKEND, operation.value)
             continue
         }
 

@@ -133,7 +133,7 @@ export function sharedDirNameForInvite (invite) {
 const SECRET_FILES = { epoch: 'epoch.key', epochEnc: 'epoch-enc.key', owner: 'owner.key' }
 
 function writeSecretFile (storageDir, name, hex) {
-    try { getBackendFs().writeFileSync(`${storageDir}/${name}`, hex) } catch (e) { logger.log('[ERROR] shared secret persist', name, e) }
+    try { getBackendFs().writeFileSync(`${storageDir}/${name}`, hex); return true } catch (e) { logger.log('[ERROR] shared secret persist', name, e); return false }
 }
 
 function readSecretFile (storageDir, name) {
@@ -147,13 +147,17 @@ function readSecretFile (storageDir, name) {
 }
 
 // Persist whichever secrets ctx currently holds. Safe to call repeatedly.
+// Returns true only if the EPOCH KEY (the one required to decrypt this base)
+// durably persisted — callers that commit a dir index gate on this so a base
+// whose secrets did not reach disk is retried, not reopened empty on restart.
 export function persistSharedSecrets (ctx) {
-    if (!ctx.storageDir) return
-    if (ctx.epochKey) writeSecretFile(ctx.storageDir, SECRET_FILES.epoch, b4a.toString(ctx.epochKey, 'hex'))
+    if (!ctx.storageDir || !ctx.epochKey) return false
+    const epochOk = writeSecretFile(ctx.storageDir, SECRET_FILES.epoch, b4a.toString(ctx.epochKey, 'hex'))
     const encHex = epochSecretKeyHex(ctx.epochEncryptionKeyPair)
     if (encHex) writeSecretFile(ctx.storageDir, SECRET_FILES.epochEnc, encHex)
     const ownerHex = ownerAuthoritySecretKeyHex(ctx.ownerAuthorityKeyPair)
     if (ownerHex) writeSecretFile(ctx.storageDir, SECRET_FILES.owner, ownerHex)
+    return epochOk
 }
 
 // Load any persisted secrets into ctx (reopen). Must run before apply() can be
@@ -517,5 +521,65 @@ export async function joinSharedBaseViaInvite (createBaseContext, { invite, stor
         _sharedJoinTempSwarms.delete(tempSwarm)
         try { await tempPairing.close() } catch (_) {}
         try { await tempSwarm.destroy() } catch (_) {}
+    }
+}
+
+// --- Cross-device auto-join (no invite) ---------------------------------------
+// A paired device that read base <baseKeyHex>'s credentials from the personal
+// base opens it READ-ONLY here (replicate + decrypt). It derives its own writer
+// key for the base and generates a fresh epoch-encryption keypair; the caller
+// records a write-access request with these so the OWNER device can authorize
+// it (Autobase forbids a non-writer from authorizing itself — see shared-creds).
+export async function autoOpenSharedBase (createBaseContext, { baseKeyHex, creds, storageDir, bootstrap = swarmBootstrap, joinSwarm = true }) {
+    // Both keys are REQUIRED: without the epoch key the base would open but every
+    // encrypted op would silently fail to decrypt (divergence). Refuse rather
+    // than open an undecryptable base — same discipline as the local reopen path.
+    if (!creds?.encKey || !creds?.epochKey) throw new Error('auto-open requires both encKey and epochKey')
+    const ctx = createBaseContext({ role: 'shared', baseId: baseKeyHex, baseKey: b4a.from(baseKeyHex, 'hex') })
+    ctx.setEpochKey(b4a.from(creds.epochKey, 'hex'))
+    // Our own epoch-encryption keypair, so a future rekey can grant us the new
+    // epoch key (the request carries its public half).
+    if (!ctx.epochEncryptionKeyPair) ctx.epochEncryptionKeyPair = createEpochEncryptionKeyPair()
+    await openSharedBase(ctx, { baseKey: ctx.baseKey, encryptionKey: b4a.from(creds.encKey, 'hex'), storageDir, bootstrap, joinSwarm })
+    // Commit the dir index only once the secrets are durably on disk (the caller
+    // gates on this) — otherwise a restart would find the index but fail to
+    // reopen (missing epoch key) and never retry the auto-join.
+    if (!persistSharedSecrets(ctx)) {
+        await closeSharedBase(ctx)
+        throw new Error('auto-open could not persist secrets')
+    }
+    return {
+        ctx,
+        baseKeyHex: ctx.baseId,
+        writerKey: ctx.autobase?.local?.key ? b4a.toString(ctx.autobase.local.key, 'hex') : null,
+        epochPublicKey: epochPublicKeyHex(ctx.epochEncryptionKeyPair),
+        writable: ctx.autobase.writable,
+    }
+}
+
+// Owner side: authorize a requesting device's writer key on an OPEN base we own.
+// Mirrors setupSharedPairing's membership-record append, but driven by a synced
+// request instead of blind pairing. Idempotent: a writer already in the set is
+// skipped. Returns true if the writer is (now or already) authorized.
+export async function authorizeWriterOnSharedBase (ctx, { writerKey, epochPublicKey }) {
+    if (!ctx.autobase?.writable) return false
+    if (!canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair)) return false
+    if (!writerKey) return false
+    if (ctx.membershipState.writers.has(writerKey)) return true
+    try {
+        const record = createAddWriterMembershipRecord({
+            ownerAuthorityKeyPair: ctx.ownerAuthorityKeyPair,
+            writerKey,
+            baseKey: ctx.autobase.key,
+            sequence: nextMembershipSequence(ctx.membershipState),
+            epochPublicKey: epochPublicKey || null,
+        })
+        await ctx.autobase.append(record)
+        await ctx.autobase.update()
+        logger.log('[INFO] Authorized cross-device writer on shared base', { baseId: ctx.baseId?.slice(0, 16), writer: writerKey.slice(0, 16) })
+        return ctx.membershipState.writers.has(writerKey)
+    } catch (e) {
+        logger.log('[ERROR] authorizeWriterOnSharedBase failed:', e)
+        return false
     }
 }

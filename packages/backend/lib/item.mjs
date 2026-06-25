@@ -15,6 +15,7 @@ import {
 import { createViewCheckpoint } from './view-checkpoint.mjs'
 import { isBoardType, applyStatusTransition, doneStatusesOf, validateTicketDraft } from './board.mjs'
 import { buildMovedItem, isSameSurfaceMove } from './list-move.mjs'
+import { isInternalChannelItem } from './shared-creds.mjs'
 
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
 // One write chain PER BASE. The personal base uses the '__personal__' chain
@@ -517,11 +518,13 @@ export async function rebuildAllItems() {
 // tickets, and any additional list. `currentList`/`syncListToFrontend` are
 // single-list-scoped (they only carry the default list), so on a restart these
 // would never reach the frontend and created lists/tickets would vanish. We
-// surface them here so they can be re-projected per item.
+// surface them here so they can be re-projected per item. The internal
+// cross-device-sync channels (shared creds / write-access requests) are
+// EXCLUDED — they ride the personal base but must never reach the UI.
 export async function rebuildExtraListItems() {
     const { items, allItems = [] } = await updateViewCheckpoint('rebuildExtraListItems')
     const defaultIds = new Set(items.map((it) => it && it.id).filter(Boolean))
-    return allItems.filter((it) => it && it.id && !defaultIds.has(it.id))
+    return allItems.filter((it) => it && it.id && !defaultIds.has(it.id) && !isInternalChannelItem(it))
 }
 
 // Push each item to the frontend as an individual add. Unlike SYNC_LIST (which
