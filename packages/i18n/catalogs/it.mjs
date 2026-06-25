@@ -622,6 +622,7 @@ export const IT_MESSAGES = {
     'backup.error.invalidFile': 'Questo non è un file di backup Listam valido.',
     'backup.error.seedIncomplete': "Questo dispositivo è entrato come ospite, quindi non ha un'identità completa da esportare.",
     'backup.error.notWritable': 'Importazione non ancora possibile: questo dispositivo non può salvare modifiche.',
+    'backup.error.syncStalled': 'Importazione impossibile: questo dispositivo non riesce a raggiungere nessun peer per sincronizzarsi, quindi le modifiche non si possono ancora salvare. Riprova quando un peer è online.',
     'backup.error.generic': 'Qualcosa è andato storto. Riprova.',
     'backup.boardConfigSkipped': 'Le impostazioni della board sono state ignorate: solo il proprietario può modificarle.',
     'backup.auto.section': 'Backup automatici',

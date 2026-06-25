@@ -622,6 +622,7 @@ export const EN_MESSAGES = {
     'backup.error.invalidFile': 'That is not a valid Listam backup file.',
     'backup.error.seedIncomplete': 'This device joined as a guest, so it has no full identity to export.',
     'backup.error.notWritable': 'Cannot import yet — this device is not able to save changes.',
+    'backup.error.syncStalled': 'Cannot import: this device can’t reach any peer to sync with, so changes can’t be saved yet. Try again once a peer is online.',
     'backup.error.generic': 'Something went wrong. Please try again.',
     'backup.boardConfigSkipped': 'Board settings were skipped — only the board owner can change them.',
     'backup.auto.section': 'Automatic backups',

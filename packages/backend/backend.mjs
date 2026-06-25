@@ -308,9 +308,12 @@ export async function startBackend(platform) {
     await reconcileSharedBases()
 
     // Recover any list whose shared base is permanently unreachable (its items
-    // were stranded by a share into a base this device can't open). Idempotent
-    // and self-limiting; retries internally until the writer can flush.
-    await healOrphanedSharedLists()
+    // were stranded by a share into a base this device can't open). Runs in the
+    // BACKGROUND — never block startup on it, since on a base that cannot yet
+    // flush each resurrect write waits out the flush gate (the renderer would
+    // otherwise time out with "could not start the backend"). Idempotent and
+    // self-limiting; retries internally until the writer can flush.
+    healOrphanedSharedLists().catch((e) => logger.log('[ERROR] boot orphan-heal failed:', e))
 
     const disposeTeardown = platform.onTeardown?.(shutdownBackend)
     return { paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown }
@@ -1165,7 +1168,11 @@ export async function healOrphanedSharedLists () {
             if (_healAttempts === 1 || _healAttempts % 10 === 0) {
                 logger.log('[AUDIT] Healing orphaned shared list', { listId: plan.listId, name: plan.list.name, recoverable: plan.items.length, baseKey: String(plan.baseKey).slice(0, 16), attempt: _healAttempts })
             }
-            // 1) Un-share: re-point the registry entry at the personal base.
+            // 1) Un-share: re-point the registry entry at the personal base. If
+            // this single write cannot flush (no reachable indexer yet), BAIL the
+            // whole plan and retry later — never grind through dozens of writes
+            // that will each just wait out the flush gate (that blocked startup
+            // for minutes when the heal was awaited on boot).
             let ok = await updateItem(buildListMetaItem({
                 id: plan.list.id,
                 name: plan.list.name || plan.list.id,
@@ -1178,12 +1185,15 @@ export async function healOrphanedSharedLists () {
             }))
             // 2) Resurrect each tombstoned item (original id + fields preserved,
             // so day-plan pointers still resolve), with strictly-increasing
-            // timestamps so the resurrect wins LWW over any stale update.
+            // timestamps so the resurrect wins LWW over any stale update. Stop at
+            // the first write that cannot flush — the rest would fail the same way.
             let stamp = Date.now()
             let restored = 0
-            for (const item of plan.items) {
-                if (await updateItem({ ...item, listId: plan.list.id, updatedAt: ++stamp })) restored++
-                else ok = false
+            if (ok) {
+                for (const item of plan.items) {
+                    if (await updateItem({ ...item, listId: plan.list.id, updatedAt: ++stamp })) restored++
+                    else { ok = false; break }
+                }
             }
             if (ok && restored === plan.items.length) {
                 markHealedOrphan(plan.baseKey)

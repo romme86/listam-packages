@@ -622,6 +622,7 @@ export const PT_MESSAGES = {
     'backup.error.invalidFile': 'Esse não é um ficheiro de backup Listam válido.',
     'backup.error.seedIncomplete': 'Este dispositivo entrou como convidado, por isso não tem uma identidade completa para exportar.',
     'backup.error.notWritable': 'Ainda não é possível importar — este dispositivo não consegue guardar alterações.',
+    'backup.error.syncStalled': 'Não é possível importar: este dispositivo não consegue alcançar nenhum par para sincronizar, por isso as alterações ainda não podem ser guardadas. Tente novamente quando um par estiver online.',
     'backup.error.generic': 'Algo correu mal. Tente novamente.',
     'backup.boardConfigSkipped': 'As definições do quadro foram ignoradas — só o proprietário as pode alterar.',
     'backup.auto.section': 'Backups automáticos',

@@ -622,6 +622,7 @@ export const ES_MESSAGES = {
     'backup.error.invalidFile': 'Ese no es un archivo de copia de Listam valido.',
     'backup.error.seedIncomplete': 'Este dispositivo se unio como invitado, asi que no tiene una identidad completa para exportar.',
     'backup.error.notWritable': 'Aun no se puede importar: este dispositivo no puede guardar cambios.',
+    'backup.error.syncStalled': 'No se puede importar: este dispositivo no puede conectarse con ningun par para sincronizar, asi que los cambios no se pueden guardar todavia. Intentalo cuando haya un par en linea.',
     'backup.error.generic': 'Algo salio mal. Intentalo de nuevo.',
     'backup.boardConfigSkipped': 'Se omitieron los ajustes del tablero: solo el propietario puede cambiarlos.',
     'backup.auto.section': 'Copias automaticas',

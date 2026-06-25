@@ -56,7 +56,7 @@ function ctxView (ctx) {
 const FLUSHABLE_WAIT_MS = 4000
 const FLUSHABLE_POLL_MS = 200
 
-async function waitForFlushableWriter (view) {
+export async function waitForFlushableWriter (view) {
     const v = view || ctxView(null)
     const deadline = Date.now() + FLUSHABLE_WAIT_MS
     for (;;) {

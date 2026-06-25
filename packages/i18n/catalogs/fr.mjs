@@ -622,6 +622,7 @@ export const FR_MESSAGES = {
     'backup.error.invalidFile': "Ce n'est pas un fichier de sauvegarde Listam valide.",
     'backup.error.seedIncomplete': "Cet appareil a rejoint en tant qu'invité ; il n'a donc pas d'identité complète à exporter.",
     'backup.error.notWritable': "Import impossible pour l'instant — cet appareil ne peut pas encore enregistrer.",
+    'backup.error.syncStalled': "Import impossible : cet appareil ne peut joindre aucun pair pour se synchroniser, les modifications ne peuvent donc pas encore être enregistrées. Réessayez quand un pair est en ligne.",
     'backup.error.generic': "Une erreur s'est produite. Veuillez réessayer.",
     'backup.boardConfigSkipped': 'Les réglages du tableau ont été ignorés — seul le propriétaire peut les modifier.',
     'backup.auto.section': 'Sauvegardes automatiques',

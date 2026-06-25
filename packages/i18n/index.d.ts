@@ -505,6 +505,7 @@ export type MessageKey =
     | 'backup.error.invalidFile'
     | 'backup.error.seedIncomplete'
     | 'backup.error.notWritable'
+    | 'backup.error.syncStalled'
     | 'backup.error.generic'
     | 'backup.boardConfigSkipped'
     | 'backup.auto.section'

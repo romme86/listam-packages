@@ -11,7 +11,7 @@ import {
     parseSeedPayload,
     missingRequiredSeeds,
 } from './backup-payload.mjs'
-import { rebuildAllItems, enqueueWrite, prepareListAppendOperation } from './item.mjs'
+import { rebuildAllItems, enqueueWrite, prepareListAppendOperation, waitForFlushableWriter } from './item.mjs'
 import {
     saveAutobaseKey,
     saveEncryptionKey,
@@ -99,6 +99,10 @@ async function importDataSnapshot(payload) {
     await enqueueWrite(async () => {
         if (!autobase || autobase.closing) { reason = 'not-ready'; return }
         if (!autobase.writable) { reason = 'not-writable'; return }
+        // Refuse rather than append when the local writer cannot flush: a direct
+        // autobase.append on a stalled writer (no reachable indexer) busy-loops
+        // and wedges the worker. Surface a clean error so the UI can explain.
+        if (!(await waitForFlushableWriter())) { reason = 'sync-stalled'; return }
 
         for (const op of ops) {
             try {

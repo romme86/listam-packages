@@ -622,6 +622,7 @@ export const DE_MESSAGES = {
     'backup.error.invalidFile': 'Das ist keine gültige Listam-Sicherungsdatei.',
     'backup.error.seedIncomplete': 'Dieses Gerät ist als Gast beigetreten und hat daher keine vollständige Identität zum Exportieren.',
     'backup.error.notWritable': 'Import noch nicht möglich – dieses Gerät kann keine Änderungen speichern.',
+    'backup.error.syncStalled': 'Import nicht möglich: Dieses Gerät erreicht keinen Peer zum Synchronisieren, daher können Änderungen noch nicht gespeichert werden. Versuche es erneut, sobald ein Peer online ist.',
     'backup.error.generic': 'Etwas ist schiefgelaufen. Bitte versuche es erneut.',
     'backup.boardConfigSkipped': 'Board-Einstellungen wurden übersprungen – nur der Board-Eigentümer kann sie ändern.',
     'backup.auto.section': 'Automatische Backups',
