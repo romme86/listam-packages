@@ -1,12 +1,12 @@
 export const UNGROUPED_GROUP_ID: '__ungrouped__'
 
 export interface NavGroup { id: string; name: string; listIds: string[] }
-export interface NavList { id: string; name: string; type: string; groupId: string | null; order: number; view?: Partial<import('./list-registry').RegistryListView> }
+export interface NavList { id: string; name: string; type: string; groupId: string | null; order: number; view?: Partial<import('./list-registry').RegistryListView>; baseKey?: string | null }
 export interface NavLibrary { groups: NavGroup[]; listsById: Record<string, NavList>; defaultListId: string | null }
 export interface NavMove { listId: string | null; crossedGroup: boolean; toGroupName?: string; wrapped: boolean }
 export interface NavPosition { groupId: string; groupName: string; indexInGroup: number; groupSize: number; groupIndex: number; groupCount: number }
 
-export interface ReducedRegistry { groups: Array<{ id: string; name: string; order: number }>; lists: Array<{ id: string; name: string; type: string; groupId: string | null; order: number; view?: Partial<import('./list-registry').RegistryListView> }> }
+export interface ReducedRegistry { groups: Array<{ id: string; name: string; order: number }>; lists: Array<{ id: string; name: string; type: string; groupId: string | null; order: number; view?: Partial<import('./list-registry').RegistryListView>; baseKey?: string | null }> }
 export interface ToNavOptions { extraLists?: Array<{ id: string; name?: string; type?: string; order?: number }>; defaultListId?: string | null; ungroupedName?: string }
 
 export function toNavLibrary (registry: ReducedRegistry, opts?: ToNavOptions): NavLibrary
