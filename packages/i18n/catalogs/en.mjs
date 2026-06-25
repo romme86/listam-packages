@@ -252,6 +252,7 @@ export const EN_MESSAGES = {
     'shareList.message': 'Others can join and co-edit just this list — your other lists stay private. Invite code:',
     'shareList.shared': 'Shared',
     'shareList.failed': 'Could not share this list.',
+    'shareList.builtinBlocked': 'The built-in Groceries, Board and To-do lists share one list and can’t be shared on their own. Create a named list to share.',
     'joinList.button': 'Join a list',
     'joinList.title': 'Join a shared list',
     'joinList.subtitle': 'Paste an invite to add one shared list. Your other lists stay private.',

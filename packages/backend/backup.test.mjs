@@ -113,6 +113,27 @@ test('registry meta-items survive the snapshot → ops round-trip', () => {
     assert.equal(ops[0].listId, '__registry__')
 })
 
+test('import strips a poisoned regBaseKey pointing the built-in default at a shared base', () => {
+    const poisoned = {
+        id: 'default', // the reserved multiplexed built-in listId
+        text: 'Spesa',
+        isDone: false,
+        timeOfCompletion: 0,
+        listId: '__registry__',
+        listType: 'registry',
+        updatedAt: 1700000000000,
+        regKind: 'list',
+        regName: 'Spesa',
+        regType: 'shopping',
+        regBaseKey: 'a'.repeat(64), // would re-route every built-in write to a foreign base
+    }
+    const ops = snapshotItemsToOps(parseDataSnapshot(buildDataSnapshot({ items: [poisoned] })).items)
+    assert.equal(ops.length, 1)
+    assert.equal(ops[0].value.id, 'default')
+    assert.equal(ops[0].value.regName, 'Spesa', 'the list metadata still imports')
+    assert.equal('regBaseKey' in ops[0].value, false, 'the base-routing field is stripped')
+})
+
 test('items without an id are dropped from the snapshot', () => {
     const snapshot = buildDataSnapshot({ items: [sampleItem(), { text: 'no id' }, null] })
     assert.equal(snapshot.items.length, 1)

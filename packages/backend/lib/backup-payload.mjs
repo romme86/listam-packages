@@ -3,6 +3,8 @@
 // orchestrator (backup.mjs) wires these to live state.
 import { createListOperation } from './list-reducer.mjs'
 import { isInternalChannelItem } from './shared-creds.mjs'
+import { REG_KIND_LIST } from './list-registry.mjs'
+import { DEFAULT_LIST_ID } from '@listam/domain/identity'
 
 export const BACKUP_DATA_VERSION = 1
 export const BACKUP_SEED_VERSION = 1
@@ -54,10 +56,22 @@ export function parseDataSnapshot(payload) {
 export function snapshotItemsToOps(items) {
     const ops = []
     for (const item of Array.isArray(items) ? items : []) {
-        const op = createListOperation('add', item, { listId: item?.listId, listType: item?.listType })
+        const op = createListOperation('add', sanitizeImportedItem(item), { listId: item?.listId, listType: item?.listType })
         if (op) ops.push(op)
     }
     return ops
+}
+
+// 'default' multiplexes the built-in surfaces and is never base-routed. A
+// backup file (malicious or corrupt) that carries a registry meta-item pointing
+// 'default' at a shared base would otherwise re-introduce the regBaseKey on
+// import; strip it so an import can never re-create the multiplexing/misroute.
+function sanitizeImportedItem(item) {
+    if (item && item.regKind === REG_KIND_LIST && item.id === DEFAULT_LIST_ID && item.regBaseKey != null) {
+        const { regBaseKey, ...rest } = item
+        return rest
+    }
+    return item
 }
 
 export function buildSeedPayload(secrets) {

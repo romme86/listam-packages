@@ -54,6 +54,8 @@ import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
 import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView, persistSharedSecrets, autoOpenSharedBase, authorizeWriterOnSharedBase } from './lib/shared-base.mjs'
 import { reduceRegistry, isRegistryItem, REG_KIND_LIST, buildListMetaItem } from './lib/list-registry.mjs'
+import { planOrphanedListHeals, tombstonedFromLog } from './lib/orphan-heal.mjs'
+import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE } from '@listam/domain/identity'
 import { isInternalChannelItem, buildSharedCredItem, reduceSharedCreds, buildSharedJoinReqItem, reduceSharedJoinReqs } from './lib/shared-creds.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, epochPublicKeyHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
@@ -304,6 +306,11 @@ export async function startBackend(platform) {
 
     // Open any shared single-list bases the personal registry already references.
     await reconcileSharedBases()
+
+    // Recover any list whose shared base is permanently unreachable (its items
+    // were stranded by a share into a base this device can't open). Idempotent
+    // and self-limiting; retries internally until the writer can flush.
+    await healOrphanedSharedLists()
 
     const disposeTeardown = platform.onTeardown?.(shutdownBackend)
     return { paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown }
@@ -671,6 +678,7 @@ export async function shutdownBackend() {
 
     // Close every shared single-list base before the personal base.
     if (_reconcileTimer) { clearTimeout(_reconcileTimer); _reconcileTimer = null }
+    if (_healRetryTimer) { clearTimeout(_healRetryTimer); _healRetryTimer = null }
     if (baseManager) {
         for (const ctx of baseManager.list()) {
             try { await closeSharedBase(ctx) } catch (e) { logger.log('[ERROR] Error closing shared base:', e) }
@@ -1029,9 +1037,11 @@ async function doReconcileSharedBases () {
         const personalItems = await rebuildAllItems()
         const registry = reduceRegistry(personalItems)
         // Refresh the listId → shared-base-key routing index used by writes.
+        // 'default' multiplexes the built-in surfaces and is never base-routed, so
+        // a (poisoned/legacy) regBaseKey on it is ignored here too.
         _listIdToBaseKey.clear()
         for (const list of registry.lists) {
-            if (list && list.baseKey) _listIdToBaseKey.set(list.id, list.baseKey)
+            if (list && list.baseKey && list.id !== DEFAULT_LIST_ID) _listIdToBaseKey.set(list.id, list.baseKey)
         }
         // Refresh propagated read-credentials (drives cross-device auto-open).
         _sharedCredsByBaseKey.clear()
@@ -1049,6 +1059,162 @@ async function doReconcileSharedBases () {
     }
 }
 
+// --- ORPHANED-SHARED-LIST SELF-HEAL ---------------------------------------
+// A list whose registry entry points at a shared base this device can never
+// open (no local storage AND no propagated read-credentials) has its items
+// stranded: shareList moved them into that base and tombstoned the personal
+// copies, so the list renders empty. When the originals still live in the
+// durable personal log, re-point the list at the personal base and resurrect
+// them. See lib/orphan-heal.mjs for the (pure, tested) decision logic.
+
+// Device-local marker of base keys already healed, so a heal runs at most once
+// per base even if its registry entry lingers. Stored beside the storage root.
+function healedOrphansPath () { return `${storagePath}-healed-orphans.json` }
+
+function loadHealedOrphans () {
+    try {
+        const fsA = getBackendFs()
+        if (!fsA.existsSync(healedOrphansPath())) return new Set()
+        const arr = JSON.parse(fsA.readFileSync(healedOrphansPath(), 'utf8'))
+        return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [])
+    } catch (e) {
+        logger.log('[WARNING] loadHealedOrphans unreadable; treating as empty:', e?.message ?? e)
+        return new Set()
+    }
+}
+
+function markHealedOrphan (baseKeyHex) {
+    try {
+        const fsA = getBackendFs()
+        const s = loadHealedOrphans()
+        s.add(baseKeyHex)
+        const tmp = `${healedOrphansPath()}.tmp`
+        fsA.writeFileSync(tmp, JSON.stringify([...s]))
+        fsA.renameSync(tmp, healedOrphansPath())
+    } catch (e) {
+        logger.log('[ERROR] markHealedOrphan:', e)
+    }
+}
+
+let _healing = false
+let _healRetryTimer = null
+let _healAttempts = 0
+const HEAL_RETRY_MS = 30000
+const HEAL_MAX_ATTEMPTS = 20 // ~10 min of retries; the next app start retries afresh
+
+// Read the linearized view once and reduce it to the tombstoned-item set
+// (keyed listId -> id -> last-known full payload). Used only by the heal.
+async function collectTombstonedFromView () {
+    if (!autobase || !autobase.view) return new Map()
+    try { await autobase.update() } catch (_) {}
+    const view = autobase.view
+    const entries = []
+    for (let i = 0; i < view.length; i++) {
+        try { entries.push(await view.get(i)) } catch (_) { /* skip unreadable */ }
+    }
+    return tombstonedFromLog(entries)
+}
+
+export async function healOrphanedSharedLists () {
+    if (_healing || !autobase || autobase.closing || !baseManager) return
+    _healing = true
+    try {
+        const all = await rebuildAllItems()
+        const registry = reduceRegistry(all)
+        const healed = loadHealedOrphans()
+        const localDirs = loadSharedIndex()
+        const liveByList = new Map()
+        for (const it of all) {
+            if (it && typeof it.listId === 'string' && !isRegistryItem(it) && !isInternalChannelItem(it)) {
+                liveByList.set(it.listId, (liveByList.get(it.listId) || 0) + 1)
+            }
+        }
+
+        // USABLE creds (encKey + epochKey) would have auto-opened the base, so a
+        // base that is not open despite usable creds is transient (reconcile will
+        // retry) — skip it. Absent OR incomplete creds mean the base can never be
+        // opened here: shareList self-propagates creds, so the orphaned base has an
+        // entry, but an incomplete one. Gate on usability, not mere presence.
+        const credsUsable = (k) => { const c = _sharedCredsByBaseKey.get(k); return !!(c && c.encKey && c.epochKey) }
+        const candidates = registry.lists.filter((l) => l && l.baseKey
+            && !baseManager.get(l.baseKey)
+            && !credsUsable(l.baseKey)
+            && !localDirs[l.baseKey]
+            && !healed.has(l.baseKey)
+            && (liveByList.get(l.id) || 0) === 0)
+        if (candidates.length === 0) return
+
+        // Only scan the (potentially large) view when there is a candidate.
+        const tomb = await collectTombstonedFromView()
+        const plans = planOrphanedListHeals({
+            lists: candidates,
+            isBaseOpen: (k) => !!baseManager.get(k),
+            hasCreds: (k) => credsUsable(k),
+            hasLocalDir: (k) => !!localDirs[k],
+            isHealed: (k) => healed.has(k),
+            liveCount: (id) => liveByList.get(id) || 0,
+            tombstoned: (id) => [...(tomb.get(id)?.values() ?? [])],
+        })
+        if (plans.length === 0) return
+
+        _healAttempts++
+        let anyIncomplete = false
+        for (const plan of plans) {
+            // Log the attempt only on the first pass and then sparsely, so a base
+            // that can never flush does not spam the log every retry.
+            if (_healAttempts === 1 || _healAttempts % 10 === 0) {
+                logger.log('[AUDIT] Healing orphaned shared list', { listId: plan.listId, name: plan.list.name, recoverable: plan.items.length, baseKey: String(plan.baseKey).slice(0, 16), attempt: _healAttempts })
+            }
+            // 1) Un-share: re-point the registry entry at the personal base.
+            let ok = await updateItem(buildListMetaItem({
+                id: plan.list.id,
+                name: plan.list.name || plan.list.id,
+                type: plan.list.type || DEFAULT_LIST_TYPE,
+                groupId: plan.list.groupId ?? null,
+                order: typeof plan.list.order === 'number' ? plan.list.order : 0,
+                view: plan.list.view,
+                baseKey: null,
+                updatedAt: Date.now(),
+            }))
+            // 2) Resurrect each tombstoned item (original id + fields preserved,
+            // so day-plan pointers still resolve), with strictly-increasing
+            // timestamps so the resurrect wins LWW over any stale update.
+            let stamp = Date.now()
+            let restored = 0
+            for (const item of plan.items) {
+                if (await updateItem({ ...item, listId: plan.list.id, updatedAt: ++stamp })) restored++
+                else ok = false
+            }
+            if (ok && restored === plan.items.length) {
+                markHealedOrphan(plan.baseKey)
+                logger.log('[AUDIT] Orphaned list healed', { listId: plan.listId, restored })
+            } else {
+                anyIncomplete = true
+                if (_healAttempts === 1 || _healAttempts % 10 === 0) {
+                    logger.log('[WARNING] Orphaned-list heal incomplete (local writer could not flush yet); will retry', { listId: plan.listId, restored, of: plan.items.length, attempt: _healAttempts })
+                }
+            }
+        }
+
+        // A heal that could not flush (no reachable indexer yet) retries without a
+        // restart, so it completes whenever connectivity is restored — but only up
+        // to a bound, after which the next app start retries afresh (avoids an
+        // unbounded timer for a base that can genuinely never be reached).
+        if (anyIncomplete && !_healRetryTimer && _healAttempts < HEAL_MAX_ATTEMPTS) {
+            _healRetryTimer = setTimeout(() => {
+                _healRetryTimer = null
+                healOrphanedSharedLists().catch((e) => logger.log('[ERROR] orphan-heal retry failed:', e))
+            }, HEAL_RETRY_MS)
+        } else if (anyIncomplete && _healAttempts >= HEAL_MAX_ATTEMPTS) {
+            logger.log('[WARNING] Orphaned-list heal still cannot flush after max attempts; will retry on next app start')
+        }
+    } catch (e) {
+        logger.log('[ERROR] healOrphanedSharedLists failed:', e)
+    } finally {
+        _healing = false
+    }
+}
+
 // Keep the listId → shared-base routing index in step with a registry change
 // the instant apply() linearizes it — closing the window between a registry
 // item arriving (which schedules an ASYNC reconcile) and a write for that list
@@ -1059,7 +1225,7 @@ async function doReconcileSharedBases () {
 function indexRegistryItemRoute (item) {
     if (!item || item.regKind !== REG_KIND_LIST) return
     const id = typeof item.id === 'string' ? item.id : null
-    if (!id) return
+    if (!id || id === DEFAULT_LIST_ID) return // 'default' is never base-routed (see resolveWriteContext)
     if (item.regDeleted !== true && typeof item.regBaseKey === 'string' && item.regBaseKey) {
         _listIdToBaseKey.set(id, item.regBaseKey)
     }
@@ -1102,6 +1268,13 @@ function scheduleReconcileSharedBases () {
 // in the wrong base). No key named → personal base (returns null).
 function resolveWriteContext (payload) {
     if (!payload || typeof payload !== 'object') return null
+    // The built-in Groceries/Board/Todo surfaces multiplex listId 'default' and
+    // are never shareable, so writes to 'default' ALWAYS belong to the personal
+    // base — ignore any baseKey (explicit or indexed). This is the choke point
+    // that neutralizes a poisoned/legacy regBaseKey on 'default' reaching us via
+    // import or peer replication (it would otherwise silently refuse or misroute
+    // every built-in write). The orphan-heal still detects + repairs the registry.
+    if (payload.listId === DEFAULT_LIST_ID) return null
     const explicit = typeof payload.baseKey === 'string' && payload.baseKey ? payload.baseKey : null
     const key = explicit || (payload.listId ? _listIdToBaseKey.get(payload.listId) : null) || null
     if (!key) return null
@@ -1117,6 +1290,13 @@ async function shareList (listId) {
     if (!baseManager) return { ok: false, reason: 'not-ready' }
     if (!autobase || !autobase.writable) return { ok: false, reason: 'not-writable' }
     if (typeof listId !== 'string' || !listId) return { ok: false, reason: 'bad-list' }
+    // The built-in Groceries/Board/Todo surfaces are multiplexed onto the single
+    // reserved listId 'default' (differentiated only by listType). Sharing by
+    // listId would sweep ALL THREE surfaces' items into one shared base and
+    // tombstone the personal copies — silently emptying the other two (and, if
+    // that base is later unreachable, stranding every item). Refuse it; only
+    // registry-backed named lists (each with its own listId) can be shared.
+    if (listId === DEFAULT_LIST_ID) return { ok: false, reason: 'cannot-share-builtin' }
 
     // Already shared → return a fresh invite from the open base.
     if (_listIdToBaseKey.has(listId)) {
@@ -1234,6 +1414,17 @@ async function joinList (invite) {
             clearWriteChain(ctx)
             await closeSharedBase(ctx)
             return { ok: false, reason: 'join-timeout' }
+        }
+
+        // A shared base claiming the reserved 'default' listId would multiplex
+        // onto the built-in Groceries/Board/Todo surfaces (and route their writes
+        // into it). Refuse — 'default' is never base-routed (see resolveWriteContext).
+        if (identity.listId === DEFAULT_LIST_ID) {
+            logger.log('[WARNING] join-list refused; shared base claims the reserved built-in listId', { listId: identity.listId })
+            baseManager.remove(baseKeyHex)
+            clearWriteChain(ctx)
+            await closeSharedBase(ctx)
+            return { ok: false, reason: 'cannot-join-builtin' }
         }
 
         // listId-collision guard: if this id already names a DIFFERENT list in

@@ -252,6 +252,7 @@ export const DE_MESSAGES = {
     'shareList.message': 'Andere können nur diese Liste mitbearbeiten — deine übrigen Listen bleiben privat. Einladungscode:',
     'shareList.shared': 'Geteilt',
     'shareList.failed': 'Diese Liste konnte nicht geteilt werden.',
+    'shareList.builtinBlocked': 'Die integrierten Listen Einkäufe, Board und To-do teilen sich eine Liste und können nicht einzeln geteilt werden. Erstelle eine benannte Liste zum Teilen.',
     'joinList.button': 'Liste beitreten',
     'joinList.title': 'Geteilter Liste beitreten',
     'joinList.subtitle': 'Füge eine Einladung ein, um eine geteilte Liste hinzuzufügen. Deine übrigen Listen bleiben privat.',

@@ -252,6 +252,7 @@ export const PT_MESSAGES = {
     'shareList.message': 'Outros podem entrar e coeditar apenas esta lista — suas outras listas continuam privadas. Código de convite:',
     'shareList.shared': 'Compartilhada',
     'shareList.failed': 'Não foi possível compartilhar esta lista.',
+    'shareList.builtinBlocked': 'As listas integradas Compras, Quadro e Tarefas compartilham uma única lista e não podem ser compartilhadas separadamente. Crie uma lista nomeada para compartilhar.',
     'joinList.button': 'Entrar em uma lista',
     'joinList.title': 'Entrar em uma lista compartilhada',
     'joinList.subtitle': 'Cole um convite para adicionar uma lista compartilhada. Suas outras listas continuam privadas.',

@@ -141,6 +141,7 @@ export type MessageKey =
     | 'shareList.message'
     | 'shareList.shared'
     | 'shareList.failed'
+    | 'shareList.builtinBlocked'
     | 'joinList.button'
     | 'joinList.title'
     | 'joinList.subtitle'

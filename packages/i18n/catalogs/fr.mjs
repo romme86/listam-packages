@@ -252,6 +252,7 @@ export const FR_MESSAGES = {
     'shareList.message': 'D\'autres peuvent rejoindre et coéditer uniquement cette liste — vos autres listes restent privées. Code d\'invitation :',
     'shareList.shared': 'Partagée',
     'shareList.failed': 'Impossible de partager cette liste.',
+    'shareList.builtinBlocked': 'Les listes intégrées Courses, Tableau et À faire partagent une seule liste et ne peuvent pas être partagées séparément. Créez une liste nommée à partager.',
     'joinList.button': 'Rejoindre une liste',
     'joinList.title': 'Rejoindre une liste partagée',
     'joinList.subtitle': 'Collez une invitation pour ajouter une liste partagée. Vos autres listes restent privées.',

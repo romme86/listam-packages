@@ -252,6 +252,7 @@ export const IT_MESSAGES = {
     'shareList.message': 'Altri possono unirsi e modificare solo questa lista — le altre liste restano private. Codice di invito:',
     'shareList.shared': 'Condivisa',
     'shareList.failed': 'Impossibile condividere questa lista.',
+    'shareList.builtinBlocked': 'Le liste predefinite Spesa, Bacheca e Cose da fare condividono un’unica lista e non si possono condividere singolarmente. Crea una lista con nome da condividere.',
     'joinList.button': 'Unisciti a una lista',
     'joinList.title': 'Unisciti a una lista condivisa',
     'joinList.subtitle': 'Incolla un invito per aggiungere una lista condivisa. Le altre liste restano private.',
