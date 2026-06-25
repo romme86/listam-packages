@@ -17,7 +17,7 @@ const NPM_ENV = { ...process.env, npm_config_userconfig: join(ROOT, '.npmrc') }
 
 // Dependency order: leaves, then client (→protocol), then backend.
 const ORDER = [
-    'protocol', 'domain', 'logging', 'secrets', 'grocery', 'i18n', 'owner-control',
+    'protocol', 'domain', 'logging', 'secrets', 'grocery', 'i18n', 'owner-control', 'provisioning',
     'client',
     'backend',
 ]

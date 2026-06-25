@@ -1,6 +1,6 @@
 {
   "name": "@listam/backend",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -19,10 +19,10 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@listam/domain": "^0.9.0",
+    "@listam/domain": "^0.10.0",
     "@listam/logging": "^0.7.0",
     "@listam/owner-control": "^0.14.0",
-    "@listam/protocol": "^0.8.0",
+    "@listam/protocol": "^0.9.0",
     "@listam/secrets": "^0.7.0",
     "autobase": "^7.20.0",
     "b4a": "^1.7.1",
