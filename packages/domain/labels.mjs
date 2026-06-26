@@ -15,6 +15,11 @@
 //    listId 'default' and so have no registry meta-item of their own. This channel
 //    lets a rename of a built-in surface sync across devices, keyed by the surface
 //    key `${listId}:${type}`. Anyone may rename; LWW by updatedAt.
+//  • BUILTIN-GROUP labels: which user group each built-in surface belongs to.
+//    Desktop used to keep this in device-local localStorage (preferences.
+//    builtinGroups), so a fresh device never saw the placement; this channel
+//    replicates it. Same surface key as the rename channel; the *value* is the
+//    target groupId (parked in labelName). LWW by updatedAt.
 //
 // Empty name = cleared: the peer label disappears / the built-in reverts to its
 // localized default. The reducers drop a newest-but-empty entry so a clear
@@ -24,6 +29,8 @@ export const PEER_LABEL_LIST_ID = '__peers__'
 export const PEER_LABEL_LIST_TYPE = 'peer'
 export const SURFACE_LABEL_LIST_ID = '__surfacenames__'
 export const SURFACE_LABEL_LIST_TYPE = 'surfacename'
+export const BUILTIN_GROUP_LIST_ID = '__builtingroups__'
+export const BUILTIN_GROUP_LIST_TYPE = 'builtingroup'
 
 // Mirrors owner-control's device-name clamp; keeps a single grapheme-naive cap.
 export const MAX_LABEL_NAME = 64
@@ -36,11 +43,15 @@ export function isSurfaceLabelItem (item) {
     return !!item && typeof item === 'object' && item.listType === SURFACE_LABEL_LIST_TYPE
 }
 
+export function isBuiltinGroupItem (item) {
+    return !!item && typeof item === 'object' && item.listType === BUILTIN_GROUP_LIST_TYPE
+}
+
 // Any synced meta-item from this module — i.e. one that must never render as a
 // real list row or be picked up as a stray list by detectExtraLists / the nav
 // library. Kept separate from isRegistryItem so each predicate stays single-purpose.
 export function isLabelItem (item) {
-    return isPeerLabelItem(item) || isSurfaceLabelItem(item)
+    return isPeerLabelItem(item) || isSurfaceLabelItem(item) || isBuiltinGroupItem(item)
 }
 
 function numberOr (value, fallback) {
@@ -93,6 +104,16 @@ export function buildSurfaceLabelItem ({ listId, type, name, updatedAt }) {
     return { ...baseLabelItem({ id: key, listId: SURFACE_LABEL_LIST_ID, listType: SURFACE_LABEL_LIST_TYPE, name, updatedAt }), surfaceKey: key }
 }
 
+// Build the synced item that files a built-in surface into a user group. The
+// *value* is the target groupId (parked in labelName the way a rename parks the
+// name); an empty groupId clears the assignment so the surface falls back to the
+// general/ungrouped group. Keyed by the same surface key as the rename channel,
+// so desktop and mobile target the same item for a given (listId, type).
+export function buildBuiltinGroupItem ({ listId, type, groupId, updatedAt }) {
+    const key = surfaceLabelKey(listId, type)
+    return { ...baseLabelItem({ id: key, listId: BUILTIN_GROUP_LIST_ID, listType: BUILTIN_GROUP_LIST_TYPE, name: groupId, updatedAt }), surfaceKey: key }
+}
+
 // Reduce label items to Map<id, name>: newest updatedAt wins per id; a newest
 // entry whose name is empty is treated as "cleared" and produces no map entry.
 // The item pipeline already LWW-merges by id, but reducing defensively here means
@@ -122,4 +143,11 @@ export function reducePeerLabels (items) {
 // Map<surfaceKey, name> over a flat item list, where surfaceKey === surfaceLabelKey(listId, type).
 export function reduceSurfaceLabels (items) {
     return reduceLabels(items, isSurfaceLabelItem)
+}
+
+// Map<surfaceKey, groupId> over a flat item list — which group each built-in
+// surface belongs to. An empty value = cleared (no entry), so the consumer
+// falls back to its general/ungrouped group.
+export function reduceBuiltinGroups (items) {
+    return reduceLabels(items, isBuiltinGroupItem)
 }

@@ -5,14 +5,19 @@ import {
     PEER_LABEL_LIST_TYPE,
     SURFACE_LABEL_LIST_ID,
     SURFACE_LABEL_LIST_TYPE,
+    BUILTIN_GROUP_LIST_ID,
+    BUILTIN_GROUP_LIST_TYPE,
     isPeerLabelItem,
     isSurfaceLabelItem,
+    isBuiltinGroupItem,
     isLabelItem,
     surfaceLabelKey,
     buildPeerLabelItem,
     buildSurfaceLabelItem,
+    buildBuiltinGroupItem,
     reducePeerLabels,
     reduceSurfaceLabels,
+    reduceBuiltinGroups,
     cleanLabelName,
 } from './labels.mjs'
 import { normalizeListItem } from './list-reducer.mjs'
@@ -100,5 +105,62 @@ test('peer and surface buckets do not cross-read', () => {
     assert.equal(reducePeerLabels(items).size, 1)
     assert.equal(reduceSurfaceLabels(items).size, 1)
     assert.equal(reducePeerLabels(items).get('k'), 'Phone')
+    assert.equal(reduceSurfaceLabels(items).get('default:shopping'), 'Spesa')
+})
+
+test('buildBuiltinGroupItem parks the groupId and is validator-safe', () => {
+    const it = buildBuiltinGroupItem({ listId: 'default', type: 'shopping', groupId: 'group-123-4', updatedAt: 3 })
+    assert.equal(it.id, 'default:shopping')
+    assert.equal(it.surfaceKey, 'default:shopping')
+    assert.equal(it.listId, BUILTIN_GROUP_LIST_ID)
+    assert.equal(it.listType, BUILTIN_GROUP_LIST_TYPE)
+    // The groupId rides in text/labelName the way a name does.
+    assert.equal(it.text, 'group-123-4')
+    assert.equal(it.labelName, 'group-123-4')
+    assert.equal(it.isDone, false)
+    assert.equal(it.timeOfCompletion, 0)
+    assert.equal(isBuiltinGroupItem(it), true)
+    assert.equal(isLabelItem(it), true)
+    // Not mistaken for a registry item, nor for the other label channels.
+    assert.equal(isRegistryItem(it), false)
+    assert.equal(isPeerLabelItem(it), false)
+    assert.equal(isSurfaceLabelItem(it), false)
+    // An older peer's strict normalizer stores it (does not drop it).
+    assert.ok(normalizeListItem(it))
+})
+
+test('reduceBuiltinGroups keeps newest groupId by updatedAt, ignores noise', () => {
+    const items = [
+        buildBuiltinGroupItem({ listId: 'default', type: 'shopping', groupId: 'general', updatedAt: 1 }),
+        buildBuiltinGroupItem({ listId: 'default', type: 'shopping', groupId: 'routine', updatedAt: 5 }),
+        buildBuiltinGroupItem({ listId: 'default', type: 'todo', groupId: 'routine', updatedAt: 2 }),
+        { id: 'noise', text: 'milk', isDone: false, timeOfCompletion: 0, listType: 'shopping' },
+    ]
+    const map = reduceBuiltinGroups(items)
+    assert.equal(map.get('default:shopping'), 'routine')
+    assert.equal(map.get('default:todo'), 'routine')
+    assert.equal(map.size, 2)
+})
+
+test('an empty builtin-group value clears the placement (reverts to general)', () => {
+    const items = [
+        buildBuiltinGroupItem({ listId: 'default', type: 'board', groupId: 'routine', updatedAt: 1 }),
+        buildBuiltinGroupItem({ listId: 'default', type: 'board', groupId: '', updatedAt: 9 }),
+    ]
+    assert.equal(reduceBuiltinGroups(items).has('default:board'), false)
+})
+
+test('the three label buckets stay isolated (no cross-read)', () => {
+    const items = [
+        buildPeerLabelItem({ writerKey: 'k', name: 'Phone', updatedAt: 1 }),
+        buildSurfaceLabelItem({ listId: 'default', type: 'shopping', name: 'Spesa', updatedAt: 1 }),
+        buildBuiltinGroupItem({ listId: 'default', type: 'shopping', groupId: 'routine', updatedAt: 1 }),
+    ]
+    assert.equal(reducePeerLabels(items).size, 1)
+    assert.equal(reduceSurfaceLabels(items).size, 1)
+    assert.equal(reduceBuiltinGroups(items).size, 1)
+    assert.equal(reduceBuiltinGroups(items).get('default:shopping'), 'routine')
+    // The rename and the group placement share a surfaceKey but live in
+    // different buckets, so neither leaks into the other's reduce.
     assert.equal(reduceSurfaceLabels(items).get('default:shopping'), 'Spesa')
 })
