@@ -53,11 +53,13 @@ export const RPC_LEAF_PROVISION_INFO = 27
 // Replies with the mutation result; a rigor-gate failure additionally pushes
 // RPC_MESSAGE { type: 'move-rigor-missing', missing } so nothing is deleted.
 export const RPC_MOVE = 28
-// Automatic pre-join backups (device-key + required user password). All three
-// are request/response. LIST replies { ok, backups: [{ file, createdAt }],
-// passwordSet }. RESTORE { file, password } decrypts a saved auto-backup and
-// merges it (LWW). SET_BACKUP_PASSWORD { current?, next } stores/changes the
-// password (stored encrypted under the device key so join-time backups run
+// Automatic backups (device-key + required user password). All request/response.
+// LIST replies { ok, backups: [{ file, createdAt }], passwordSet, schedule }
+// where `schedule` is { enabled, passwordSet, tiers: [{ reason, label,
+// intervalMs, lastAt }] } describing the rolling scheduled backups. RESTORE
+// { file, password } decrypts a saved auto-backup and merges it (LWW).
+// SET_BACKUP_PASSWORD { current?, next } stores/changes the password (stored
+// encrypted under the device key so join-time and scheduled backups run
 // unattended).
 export const RPC_LIST_BACKUPS = 29
 export const RPC_RESTORE_BACKUP = 30
@@ -68,3 +70,8 @@ export const RPC_SET_BACKUP_PASSWORD = 31
 // whole personal base). Both reply request/response.
 export const RPC_SHARE_LIST = 32
 export const RPC_JOIN_LIST = 33
+// Enable/disable rolling scheduled backups (15-min / daily / weekly), which the
+// backend writes as fixed-name files overwritten each cadence. { enabled }
+// request/response; reply { ok, schedule }. The three cadences themselves are
+// fixed; this only toggles the whole schedule on or off.
+export const RPC_SET_BACKUP_SCHEDULE = 34

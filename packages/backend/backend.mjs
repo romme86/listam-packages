@@ -28,6 +28,7 @@ import {
     RPC_LIST_BACKUPS,
     RPC_RESTORE_BACKUP,
     RPC_SET_BACKUP_PASSWORD,
+    RPC_SET_BACKUP_SCHEDULE,
     RPC_SHARE_LIST,
     RPC_JOIN_LIST
 } from '@listam/protocol'
@@ -44,7 +45,7 @@ import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
 import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.mjs'
-import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet } from './lib/auto-backup.mjs'
+import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet, startScheduledBackups, stopScheduledBackups, scheduleState, setScheduleEnabled } from './lib/auto-backup.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
@@ -315,6 +316,10 @@ export async function startBackend(platform) {
     // self-limiting; retries internally until the writer can flush.
     healOrphanedSharedLists().catch((e) => logger.log('[ERROR] boot orphan-heal failed:', e))
 
+    // Rolling scheduled backups (15‑min / daily / weekly). No‑op until a backup
+    // password is set; the catch‑up pass inside takes any tier that is due now.
+    startScheduledBackups()
+
     const disposeTeardown = platform.onTeardown?.(shutdownBackend)
     return { paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown }
 }
@@ -543,6 +548,7 @@ async function handleFrontendRequest(req, error) {
                     ok: true,
                     backups: listAutoBackups(),
                     passwordSet: isBackupPasswordSet(),
+                    schedule: scheduleState(),
                 }))
                 break
             }
@@ -563,7 +569,20 @@ async function handleFrontendRequest(req, error) {
                 const data = parseRpcJson(req.data)
                 await replyBackupResult(req, async () => {
                     await setBackupPassword({ current: data?.current, next: data?.next })
+                    // A freshly set password unlocks the schedule: restart it so
+                    // the catch-up pass writes the first rolling files now.
+                    startScheduledBackups()
                     return { ok: true }
+                })
+                break
+            }
+            case RPC_SET_BACKUP_SCHEDULE: {
+                logger.log('[INFO] Command RPC_SET_BACKUP_SCHEDULE')
+                const data = parseRpcJson(req.data)
+                await replyBackupResult(req, async () => {
+                    setScheduleEnabled(data?.enabled !== false)
+                    startScheduledBackups()
+                    return { ok: true, schedule: scheduleState() }
                 })
                 break
             }
@@ -680,6 +699,7 @@ export async function shutdownBackend() {
     logger.log('[INFO] Backend shutting down...')
 
     // Close every shared single-list base before the personal base.
+    stopScheduledBackups()
     if (_reconcileTimer) { clearTimeout(_reconcileTimer); _reconcileTimer = null }
     if (_healRetryTimer) { clearTimeout(_healRetryTimer); _healRetryTimer = null }
     if (baseManager) {
