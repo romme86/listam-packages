@@ -365,6 +365,7 @@ export function ticketBadges (item, now = Date.now()) {
         inProgressMs,
         inProgressHours: msToHours(inProgressMs),
         estimatedHours: typeof item?.estimatedHours === 'number' ? item.estimatedHours : null,
+        estimatedComplexity: typeof item?.estimatedComplexity === 'number' ? item.estimatedComplexity : null,
         timeliness: item?.timeliness || null,
         isDone: !!item?.isDone,
         running: item?.status === 'in_progress',

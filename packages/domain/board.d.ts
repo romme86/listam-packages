@@ -109,6 +109,7 @@ export interface TicketBadgeData {
     inProgressMs: number
     inProgressHours: number
     estimatedHours: number | null
+    estimatedComplexity: number | null
     timeliness: Timeliness | null
     isDone: boolean
     running: boolean
