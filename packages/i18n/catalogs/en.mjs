@@ -115,6 +115,7 @@ export const EN_MESSAGES = {
     'ticket.block.delete': 'Delete block',
     'ticket.block.move': 'Drag to reorder',
     'ticket.block.editHint': 'Click to edit, click away to save.',
+    'ticket.block.slashHint': 'Type / for blocks',
     'ticket.block.imageEmpty': 'Empty image block',
     'ticket.block.type.markdown': 'Text',
     'ticket.block.type.checklist': 'Checklist',

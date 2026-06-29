@@ -627,6 +627,7 @@ export type MessageKey =
     | 'ticket.block.delete'
     | 'ticket.block.move'
     | 'ticket.block.editHint'
+    | 'ticket.block.slashHint'
     | 'ticket.block.imageEmpty'
     | 'ticket.block.type.markdown'
     | 'ticket.block.type.checklist'
