@@ -405,6 +405,8 @@ export function deltaPercent (actualHours, estimatedHours) {
 
 // Order + i18n label (+ a desktop tabler icon hint) for the insert menu.
 export const BLOCK_TYPES = [
+    { type: 'heading', icon: 'heading', labelKey: 'ticket.block.type.heading' },
+    { type: 'divider', icon: 'minus', labelKey: 'ticket.block.type.divider' },
     { type: 'markdown', icon: 'align-left', labelKey: 'ticket.block.type.markdown' },
     { type: 'checklist', icon: 'checklist', labelKey: 'ticket.block.type.checklist' },
     { type: 'numberedList', icon: 'list-numbers', labelKey: 'ticket.block.type.numberedList' },
@@ -429,6 +431,8 @@ export function normalizeBlocks (blocks) {
 export function createBlock (type, id) {
     const base = { id, type: isBlockType(type) ? type : 'markdown' }
     switch (base.type) {
+        case 'heading': return { ...base, text: '', level: 2 }
+        case 'divider': return { ...base }
         case 'checklist': return { ...base, items: [{ text: '', done: false }] }
         case 'numberedList': return { ...base, items: [{ text: '' }] }
         case 'links': return { ...base, links: [{ label: '', url: '' }] }

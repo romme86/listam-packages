@@ -314,9 +314,11 @@ test('formatDuration / deltaPercent format compactly', () => {
 
 // --- block parse/serialize round-trips ---------------------------------------
 
-test('BLOCK_TYPES covers eight kinds and isBlockType validates them', () => {
-    assert.equal(BLOCK_TYPES.length, 8)
+test('BLOCK_TYPES covers ten kinds (incl. heading + divider) and isBlockType validates them', () => {
+    assert.equal(BLOCK_TYPES.length, 10)
     assert.equal(isBlockType('checklist'), true)
+    assert.equal(isBlockType('heading'), true)
+    assert.equal(isBlockType('divider'), true)
     assert.equal(isBlockType('bogus'), false)
 })
 
@@ -324,11 +326,17 @@ test('createBlock makes a well-shaped empty block; normalizeBlocks drops junk', 
     const cl = createBlock('checklist', 'b1')
     assert.equal(cl.type, 'checklist')
     assert.deepEqual(cl.items, [{ text: '', done: false }])
+    const heading = createBlock('heading', 'h1')
+    assert.deepEqual(heading, { id: 'h1', type: 'heading', text: '', level: 2 })
+    assert.deepEqual(createBlock('divider', 'd1'), { id: 'd1', type: 'divider' })
     assert.equal(createBlock('nope', 'b2').type, 'markdown') // unknown → markdown
     assert.deepEqual(
         normalizeBlocks([{ id: 'a', type: 'markdown' }, { type: 'links' }, null, { id: 'b', type: 'bogus' }]).map((b) => b.id),
         ['a'],
     )
+    // heading + divider survive normalization (incl. the heading level field).
+    const structural = [{ id: 'h', type: 'heading', text: 'Plan', level: 3 }, { id: 'd', type: 'divider' }]
+    assert.deepEqual(normalizeBlocks(structural), structural)
 })
 
 test('blockToText/blockFromText round-trip each block kind', () => {
