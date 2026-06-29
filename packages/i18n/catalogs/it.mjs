@@ -55,6 +55,7 @@ export const IT_MESSAGES = {
     'ticket.field.required': 'obbligatorio',
     'ticket.rigor.ownerNote': 'Solo il proprietario della board può disattivare la modalità rigore.',
     'ticket.detail.tasks': 'Attività',
+    'ticket.detail.addTask': 'Aggiungi attività',
     'ticket.detail.estimate': 'Stima',
     'ticket.detail.complexity': 'Complessità',
     'ticket.detail.timeSpent': 'Tempo in corso',

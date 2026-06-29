@@ -55,6 +55,7 @@ export const DE_MESSAGES = {
     'ticket.field.required': 'erforderlich',
     'ticket.rigor.ownerNote': 'Nur der Board-Eigentümer kann den strengen Modus ausschalten.',
     'ticket.detail.tasks': 'Aufgaben',
+    'ticket.detail.addTask': 'Aufgabe hinzufügen',
     'ticket.detail.estimate': 'Schätzung',
     'ticket.detail.complexity': 'Komplexität',
     'ticket.detail.timeSpent': 'Zeit in Bearbeitung',

@@ -552,6 +552,7 @@ export type MessageKey =
     | 'ticket.field.required'
     | 'ticket.rigor.ownerNote'
     | 'ticket.detail.tasks'
+    | 'ticket.detail.addTask'
     | 'ticket.detail.estimate'
     | 'ticket.detail.complexity'
     | 'ticket.detail.timeSpent'

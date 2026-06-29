@@ -55,6 +55,7 @@ export const PT_MESSAGES = {
     'ticket.field.required': 'obrigatório',
     'ticket.rigor.ownerNote': 'Apenas o proprietário do quadro pode desativar o modo de rigor.',
     'ticket.detail.tasks': 'Tarefas',
+    'ticket.detail.addTask': 'Adicionar tarefa',
     'ticket.detail.estimate': 'Estimativa',
     'ticket.detail.complexity': 'Complexidade',
     'ticket.detail.timeSpent': 'Tempo em curso',

@@ -55,6 +55,7 @@ export const ES_MESSAGES = {
     'ticket.field.required': 'obligatorio',
     'ticket.rigor.ownerNote': 'Solo el propietario del tablero puede desactivar el modo rigor.',
     'ticket.detail.tasks': 'Tareas',
+    'ticket.detail.addTask': 'Añadir tarea',
     'ticket.detail.estimate': 'Estimacion',
     'ticket.detail.complexity': 'Complejidad',
     'ticket.detail.timeSpent': 'Tiempo en progreso',

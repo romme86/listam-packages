@@ -55,6 +55,7 @@ export const FR_MESSAGES = {
     'ticket.field.required': 'obligatoire',
     'ticket.rigor.ownerNote': 'Seul le propriétaire du tableau peut désactiver le mode rigueur.',
     'ticket.detail.tasks': 'Tâches',
+    'ticket.detail.addTask': 'Ajouter une tâche',
     'ticket.detail.estimate': 'Estimation',
     'ticket.detail.complexity': 'Complexité',
     'ticket.detail.timeSpent': 'Temps en cours',

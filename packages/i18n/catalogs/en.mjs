@@ -55,6 +55,7 @@ export const EN_MESSAGES = {
     'ticket.field.required': 'required',
     'ticket.rigor.ownerNote': 'Only the board owner can turn rigor mode off.',
     'ticket.detail.tasks': 'Tasks',
+    'ticket.detail.addTask': 'Add task',
     'ticket.detail.estimate': 'Estimate',
     'ticket.detail.complexity': 'Complexity',
     'ticket.detail.timeSpent': 'Time in progress',
