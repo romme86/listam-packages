@@ -31,6 +31,13 @@ export const SURFACE_LABEL_LIST_ID = '__surfacenames__'
 export const SURFACE_LABEL_LIST_TYPE = 'surfacename'
 export const BUILTIN_GROUP_LIST_ID = '__builtingroups__'
 export const BUILTIN_GROUP_LIST_TYPE = 'builtingroup'
+// VALUE-RETURN labels: whether a surface has the optional "value return" property
+// enabled (each item must be rated 1-10 value + 1-10 time-delay). Keyed by the
+// same surface key as the rename/group channels so it works for built-in surfaces
+// (which carry no registry meta-item) AND named lists, uniformly and synced. The
+// *value* parked in labelName is '1' = enabled; empty = disabled (cleared).
+export const VALUE_RETURN_LIST_ID = '__valuereturn__'
+export const VALUE_RETURN_LIST_TYPE = 'valuereturn'
 
 // Mirrors owner-control's device-name clamp; keeps a single grapheme-naive cap.
 export const MAX_LABEL_NAME = 64
@@ -47,11 +54,15 @@ export function isBuiltinGroupItem (item) {
     return !!item && typeof item === 'object' && item.listType === BUILTIN_GROUP_LIST_TYPE
 }
 
+export function isValueReturnItem (item) {
+    return !!item && typeof item === 'object' && item.listType === VALUE_RETURN_LIST_TYPE
+}
+
 // Any synced meta-item from this module — i.e. one that must never render as a
 // real list row or be picked up as a stray list by detectExtraLists / the nav
 // library. Kept separate from isRegistryItem so each predicate stays single-purpose.
 export function isLabelItem (item) {
-    return isPeerLabelItem(item) || isSurfaceLabelItem(item) || isBuiltinGroupItem(item)
+    return isPeerLabelItem(item) || isSurfaceLabelItem(item) || isBuiltinGroupItem(item) || isValueReturnItem(item)
 }
 
 function numberOr (value, fallback) {
@@ -114,6 +125,14 @@ export function buildBuiltinGroupItem ({ listId, type, groupId, updatedAt }) {
     return { ...baseLabelItem({ id: key, listId: BUILTIN_GROUP_LIST_ID, listType: BUILTIN_GROUP_LIST_TYPE, name: groupId, updatedAt }), surfaceKey: key }
 }
 
+// Build the synced item that toggles the value-return property for a surface.
+// `enabled` true parks '1' in labelName; false clears it (empty = disabled), so a
+// disable propagates conflict-free without a tombstone. Keyed by surfaceLabelKey.
+export function buildValueReturnItem ({ listId, type, enabled, updatedAt }) {
+    const key = surfaceLabelKey(listId, type)
+    return { ...baseLabelItem({ id: key, listId: VALUE_RETURN_LIST_ID, listType: VALUE_RETURN_LIST_TYPE, name: enabled ? '1' : '', updatedAt }), surfaceKey: key }
+}
+
 // Reduce label items to Map<id, name>: newest updatedAt wins per id; a newest
 // entry whose name is empty is treated as "cleared" and produces no map entry.
 // The item pipeline already LWW-merges by id, but reducing defensively here means
@@ -150,4 +169,12 @@ export function reduceSurfaceLabels (items) {
 // falls back to its general/ungrouped group.
 export function reduceBuiltinGroups (items) {
     return reduceLabels(items, isBuiltinGroupItem)
+}
+
+// Map<surfaceKey, true> of surfaces that have value-return enabled. An empty
+// value = cleared (no entry), so a disable simply drops the surface from the map.
+export function reduceValueReturn (items) {
+    const out = new Map()
+    for (const key of reduceLabels(items, isValueReturnItem).keys()) out.set(key, true)
+    return out
 }

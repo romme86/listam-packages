@@ -49,6 +49,10 @@
       "types": "./plan.d.ts",
       "default": "./plan.mjs"
     },
+    "./value": {
+      "types": "./value.d.ts",
+      "default": "./value.mjs"
+    },
     "./voice-grammar": {
       "default": "./voice-grammar.mjs"
     },
@@ -79,6 +83,8 @@
     "list-move.d.ts",
     "plan.mjs",
     "plan.d.ts",
+    "value.mjs",
+    "value.d.ts",
     "voice-grammar.mjs",
     "voice-intent.mjs",
     "LICENSE"

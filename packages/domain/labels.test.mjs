@@ -7,17 +7,22 @@ import {
     SURFACE_LABEL_LIST_TYPE,
     BUILTIN_GROUP_LIST_ID,
     BUILTIN_GROUP_LIST_TYPE,
+    VALUE_RETURN_LIST_ID,
+    VALUE_RETURN_LIST_TYPE,
     isPeerLabelItem,
     isSurfaceLabelItem,
     isBuiltinGroupItem,
+    isValueReturnItem,
     isLabelItem,
     surfaceLabelKey,
     buildPeerLabelItem,
     buildSurfaceLabelItem,
     buildBuiltinGroupItem,
+    buildValueReturnItem,
     reducePeerLabels,
     reduceSurfaceLabels,
     reduceBuiltinGroups,
+    reduceValueReturn,
     cleanLabelName,
 } from './labels.mjs'
 import { normalizeListItem } from './list-reducer.mjs'
@@ -163,4 +168,32 @@ test('the three label buckets stay isolated (no cross-read)', () => {
     // The rename and the group placement share a surfaceKey but live in
     // different buckets, so neither leaks into the other's reduce.
     assert.equal(reduceSurfaceLabels(items).get('default:shopping'), 'Spesa')
+})
+
+test('buildValueReturnItem is a validator-safe label item keyed by surface', () => {
+    const it = buildValueReturnItem({ listId: 'default', type: 'board', enabled: true, updatedAt: 4 })
+    assert.equal(it.id, 'default:board')
+    assert.equal(it.surfaceKey, 'default:board')
+    assert.equal(it.listId, VALUE_RETURN_LIST_ID)
+    assert.equal(it.listType, VALUE_RETURN_LIST_TYPE)
+    assert.equal(it.labelName, '1')
+    assert.equal(isValueReturnItem(it), true)
+    assert.equal(isLabelItem(it), true)
+    assert.equal(isBuiltinGroupItem(it), false)
+    assert.equal(isSurfaceLabelItem(it), false)
+    assert.ok(normalizeListItem(it))
+})
+
+test('reduceValueReturn maps enabled surfaces; disable clears, newest wins', () => {
+    const items = [
+        buildValueReturnItem({ listId: 'default', type: 'board', enabled: true, updatedAt: 1 }),
+        buildValueReturnItem({ listId: 'list-9', type: 'todo', enabled: true, updatedAt: 1 }),
+        // toggled off later -> dropped from the map
+        buildValueReturnItem({ listId: 'list-9', type: 'todo', enabled: false, updatedAt: 5 }),
+        { id: 'noise', text: 'milk', isDone: false, timeOfCompletion: 0, listType: 'shopping' },
+    ]
+    const map = reduceValueReturn(items)
+    assert.equal(map.get('default:board'), true)
+    assert.equal(map.has('list-9:todo'), false)
+    assert.equal(map.size, 1)
 })

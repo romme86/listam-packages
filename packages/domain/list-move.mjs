@@ -22,7 +22,7 @@ import { isBoardType, BOARD_WRITE_TYPE } from './board.mjs'
 // @listam/backend lib/item.mjs — server-frozen fields (createdBy/completedBy/
 // timeliness/inProgressSince/actualInProgressHours) are deliberately absent so a
 // host cannot forge them on a fresh ticket.
-export const MOVE_TICKET_FIELDS = ['description', 'checklist', 'estimatedHours', 'estimatedComplexity', 'priority', 'assignee', 'dueAt', 'status', 'blocks', 'blockedReason']
+export const MOVE_TICKET_FIELDS = ['description', 'checklist', 'estimatedHours', 'estimatedComplexity', 'priority', 'assignee', 'dueAt', 'status', 'blocks', 'blockedReason', 'valueRate', 'delayRate']
 
 // True when the move stays inside the same listId bucket (only the type changes).
 // The caller emits a single in-place update in that case instead of delete+add.

@@ -123,7 +123,7 @@ export function clearWriteChain (ctx) {
 // Fields a client may supply when creating a board ticket. Server-controlled
 // fields (createdBy/completedBy/timeliness/inProgressSince/actualInProgressHours)
 // are deliberately excluded so they cannot be forged on create.
-const TICKET_CREATE_FIELDS = ['description', 'checklist', 'estimatedHours', 'estimatedComplexity', 'priority', 'assignee', 'dueAt', 'status', 'blocks', 'blockedReason']
+const TICKET_CREATE_FIELDS = ['description', 'checklist', 'estimatedHours', 'estimatedComplexity', 'priority', 'assignee', 'dueAt', 'status', 'blocks', 'blockedReason', 'valueRate', 'delayRate']
 
 function pickTicketExtra (extra) {
     const out = {}
