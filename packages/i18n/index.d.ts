@@ -688,6 +688,8 @@ export type MessageKey =
     | 'lists.menu.sectionView'
     | 'lists.menu.sectionItems'
     | 'lists.menu.sectionAppearance'
+    | 'lists.menu.sectionSharing'
+    | 'lists.menu.sectionNetwork'
     | 'lists.menu.createHeader'
     | 'lists.menu.newGrocerySub'
     | 'lists.menu.newBoardSub'

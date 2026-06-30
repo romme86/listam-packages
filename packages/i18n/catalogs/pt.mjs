@@ -9,6 +9,8 @@ export const PT_MESSAGES = {
     'lists.menu.sectionView': 'Vista',
     'lists.menu.sectionItems': 'Itens',
     'lists.menu.sectionAppearance': 'Aparência',
+    'lists.menu.sectionSharing': 'Partilha',
+    'lists.menu.sectionNetwork': 'Pessoas e dispositivos',
     'lists.menu.createHeader': 'Criar',
     'lists.menu.newGrocerySub': 'Organizada por categoria',
     'lists.menu.newBoardSub': 'Cartões em colunas',
