@@ -178,6 +178,7 @@ export const FR_MESSAGES = {
     },
     'main.summary.clearDone': 'Effacer les articles faits',
     'main.item.delete': 'Supprimer',
+    'main.item.details': 'Détails',
     'main.item.move': 'Déplacer vers…',
     'move.title': 'Déplacer l\'élément',
     'move.subtitle': 'Envoyer « {text} » vers une autre liste.',

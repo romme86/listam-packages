@@ -178,6 +178,7 @@ export const PT_MESSAGES = {
     },
     'main.summary.clearDone': 'Limpar concluídos',
     'main.item.delete': 'Eliminar',
+    'main.item.details': 'Detalhes',
     'main.item.move': 'Mover para…',
     'move.title': 'Mover item',
     'move.subtitle': 'Enviar “{text}” para outra lista.',

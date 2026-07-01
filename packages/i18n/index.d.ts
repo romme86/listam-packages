@@ -58,6 +58,7 @@ export type MessageKey =
     | 'main.summary.itemsLeft'
     | 'main.summary.clearDone'
     | 'main.item.delete'
+    | 'main.item.details'
     | 'main.item.move'
     | 'move.title'
     | 'move.subtitle'

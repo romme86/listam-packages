@@ -178,6 +178,7 @@ export const DE_MESSAGES = {
     },
     'main.summary.clearDone': 'Erledigte löschen',
     'main.item.delete': 'Löschen',
+    'main.item.details': 'Details',
     'main.item.move': 'Verschieben…',
     'move.title': 'Element verschieben',
     'move.subtitle': '„{text}“ in eine andere Liste verschieben.',

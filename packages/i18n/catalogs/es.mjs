@@ -178,6 +178,7 @@ export const ES_MESSAGES = {
     },
     'main.summary.clearDone': 'Borrar hechos',
     'main.item.delete': 'Eliminar',
+    'main.item.details': 'Detalles',
     'main.item.move': 'Mover a…',
     'move.title': 'Mover elemento',
     'move.subtitle': 'Envia "{text}" a otra lista.',

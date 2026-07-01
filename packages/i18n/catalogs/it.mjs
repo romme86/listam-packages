@@ -178,6 +178,7 @@ export const IT_MESSAGES = {
     },
     'main.summary.clearDone': 'Cancella i fatti',
     'main.item.delete': 'Elimina',
+    'main.item.details': 'Dettagli',
     'main.item.move': 'Sposta in…',
     'move.title': 'Sposta elemento',
     'move.subtitle': 'Sposta «{text}» in un\'altra lista.',

@@ -178,6 +178,7 @@ export const EN_MESSAGES = {
     },
     'main.summary.clearDone': 'Clear done',
     'main.item.delete': 'Delete',
+    'main.item.details': 'Details',
     'main.item.move': 'Move to…',
     'move.title': 'Move item',
     'move.subtitle': 'Send “{text}” to another list.',
