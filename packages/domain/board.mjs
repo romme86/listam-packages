@@ -457,10 +457,34 @@ export function blockToText (block) {
         case 'image':
             return [block.url || '', block.alt || ''].join('\n').replace(/\n$/, '')
         case 'table':
-            return (block.rows || []).map((row) => (row || []).join(', ')).join('\n')
+            return (block.rows || []).map((row) => (row || []).map(escapeCell).join(', ')).join('\n')
         default:
             return block.text || ''
     }
+}
+
+// A table cell may legitimately contain a comma ("CHF 1,200"), but the row text
+// channel (blockToText/blockFromText) is comma-delimited. Escape ',' — and the
+// '\' escape char itself — per cell so a grid-authored comma survives an edit
+// made through the text channel (mobile / a peer without the grid editor).
+function escapeCell (value) {
+    return String(value == null ? '' : value).replace(/\\/g, '\\\\').replace(/,/g, '\\,')
+}
+
+// Split a row line on UNESCAPED commas, unescaping each cell. Legacy rows have no
+// backslashes, so they split exactly like a plain comma-split — old data and
+// no-comma cells round-trip byte-for-byte.
+function splitRowCells (line) {
+    const cells = []
+    let cur = ''
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i]
+        if (ch === '\\' && i + 1 < line.length) { cur += line[i + 1]; i++; continue }
+        if (ch === ',') { cells.push(cur); cur = ''; continue }
+        cur += ch
+    }
+    cells.push(cur)
+    return cells
 }
 
 // Parse the raw field value back into a block payload patch (inverse of
@@ -502,9 +526,53 @@ export function blockFromText (type, text) {
             return {
                 rows: lines
                     .filter((line) => line.trim() !== '')
-                    .map((line) => line.split(',').map((cell) => cell.trim())),
+                    .map((line) => splitRowCells(line).map((cell) => cell.trim())),
             }
         default:
             return { text: raw }
     }
+}
+
+// --- Table block structural helpers -----------------------------------------
+// A table block persists as `rows`: a rectangular array-of-arrays of cell
+// strings, row 0 being the header. These pure helpers let a UI edit a table AS
+// a table (a grid of cells with add/remove row & column) instead of through the
+// lossy comma-separated `blockToText` channel — a cell may itself contain a
+// comma, which the text channel would split into two cells. They always return
+// a rectangular grid with at least one row and one column.
+
+// Coerce arbitrary (possibly ragged / empty / non-string) rows into a clean
+// rectangular grid of strings. Column count = the widest row (min 1).
+export function normalizeTableRows (rows) {
+    const src = Array.isArray(rows) && rows.length ? rows : [['', ''], ['', '']]
+    const cols = Math.max(1, ...src.map((r) => (Array.isArray(r) ? r.length : 0)))
+    return src.map((r) => {
+        const row = (Array.isArray(r) ? r : []).slice(0, cols).map((c) => (c == null ? '' : String(c)))
+        while (row.length < cols) row.push('')
+        return row
+    })
+}
+
+// Append a blank row / column.
+export function tableAddRow (rows) {
+    const grid = normalizeTableRows(rows)
+    return [...grid, new Array(grid[0].length).fill('')]
+}
+
+export function tableAddColumn (rows) {
+    const grid = normalizeTableRows(rows)
+    return grid.map((row) => [...row, ''])
+}
+
+// Remove a row / column by index, but never below a single row / column.
+export function tableRemoveRow (rows, at) {
+    const grid = normalizeTableRows(rows)
+    if (grid.length <= 1 || !Number.isInteger(at) || at < 0 || at >= grid.length) return grid
+    return grid.filter((_, i) => i !== at)
+}
+
+export function tableRemoveColumn (rows, at) {
+    const grid = normalizeTableRows(rows)
+    if (grid[0].length <= 1 || !Number.isInteger(at) || at < 0 || at >= grid[0].length) return grid
+    return grid.map((row) => row.filter((_, i) => i !== at))
 }

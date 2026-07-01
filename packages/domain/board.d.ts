@@ -139,3 +139,11 @@ export function normalizeBlocks (blocks: unknown): TicketBlock[]
 export function createBlock (type: string, id: string): TicketBlock
 export function blockToText (block: TicketBlock | null | undefined): string
 export function blockFromText (type: string, text: string): Record<string, unknown>
+
+// Table block (row 0 = header) structural helpers. All return a rectangular
+// grid of cell strings with at least one row and one column.
+export function normalizeTableRows (rows: unknown): string[][]
+export function tableAddRow (rows: unknown): string[][]
+export function tableAddColumn (rows: unknown): string[][]
+export function tableRemoveRow (rows: unknown, at: number): string[][]
+export function tableRemoveColumn (rows: unknown, at: number): string[][]
