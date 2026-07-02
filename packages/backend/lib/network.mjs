@@ -619,8 +619,23 @@ export async function initAutobase(newBaseKey, options = {}) {
             logger.log('[INFO] New data appended, updating view...')
         })
 
-        // Load existing items from view and sync to frontend
-        await autobase.update()
+        // Load existing items from view and sync to frontend.
+        // BOUNDED: on a freshly joined base the linearizer may need blocks only
+        // peers can provide, but the swarm joins later in init — an unbounded
+        // update() then dangles with no live handles left and Node exits 0
+        // silently (observed 2026-07-02: joined headless boot-looped under
+        // systemd). The un-unref'd timer doubles as the keep-alive; boot
+        // continues and the view completes once the swarm connects.
+        await new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                logger.log('[WARNING] autobase.update() did not settle within 15s at boot; continuing (view completes after peers connect)')
+                resolve()
+            }, 15_000)
+            autobase.update().then(
+                () => { clearTimeout(timer); resolve() },
+                (err) => { clearTimeout(timer); logger.log('[ERROR] autobase.update() failed at boot:', err); resolve() }
+            )
+        })
         // Rebuild membership state from the records apply() persisted into the
         // view. Autobase does not re-run apply over history on restart, so
         // without this the owner key, writer set, and sequence high-water mark
