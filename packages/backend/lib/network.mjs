@@ -642,14 +642,34 @@ export async function initAutobase(newBaseKey, options = {}) {
         // would be empty here — re-bootstrapping the owner on every launch and
         // reusing sequence numbers. Seeding from the durable log makes the
         // bootstrap below run exactly once and keeps sequences monotonic.
-        const persistedMembership = await readPersistedMembershipRecords()
-        setMembershipState(reduceMembershipLog(persistedMembership, { baseKey: autobase.key }))
-        await ensureOwnerMembership({ allowOwnerMigration })
-        const rebuiltList = await rebuildListFromPersistedOps()
-        setCurrentList(rebuiltList)
-        syncListToFrontend(rebuiltList)
-        projectItemsToFrontend(await rebuildExtraListItems())
-        broadcastMembershipRoster()
+        //
+        // BOUNDED like update() above: these view reads core.get() with
+        // wait:true, so on a freshly joined base a block only peers hold makes
+        // them dangle before the swarm exists — and with no handles left Node
+        // exits 0 silently. Race the tail against a keep-alive; on timeout,
+        // init proceeds to the swarm setup and the tail self-completes in the
+        // background once peers supply the missing blocks (its awaits resume,
+        // membership and list state land, and the frontend gets synced late).
+        const bootViewTail = (async () => {
+            const persistedMembership = await readPersistedMembershipRecords()
+            setMembershipState(reduceMembershipLog(persistedMembership, { baseKey: autobase.key }))
+            await ensureOwnerMembership({ allowOwnerMigration })
+            const rebuiltList = await rebuildListFromPersistedOps()
+            setCurrentList(rebuiltList)
+            syncListToFrontend(rebuiltList)
+            projectItemsToFrontend(await rebuildExtraListItems())
+            broadcastMembershipRoster()
+        })()
+        await new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                logger.log('[WARNING] boot view reads did not settle within 15s; continuing init (they complete once peers connect)')
+                resolve()
+            }, 15_000)
+            bootViewTail.then(
+                () => { clearTimeout(timer); resolve() },
+                (err) => { clearTimeout(timer); logger.log('[ERROR] boot view rebuild failed:', err); resolve() }
+            )
+        })
 
         // Add static peers only once
         if (!addedStaticPeers && peerKeysString) {
