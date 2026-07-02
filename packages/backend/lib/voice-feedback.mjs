@@ -20,7 +20,9 @@
 
 const sleep = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve())
 
-const DEFAULT_DWELL = { command: 350, hold: 550, fail: 450 }
+// hold (green) is deliberately long: the confirm arrives ~10s after the user
+// spoke (whisper latency), so a sub-second blink is easy to miss entirely.
+const DEFAULT_DWELL = { command: 350, hold: 1400, fail: 800 }
 
 // Grammars tried when the spoken language is unknown ('auto'): the six UI
 // locales. Order is the tie-break preference when multiple would match.
@@ -81,6 +83,16 @@ export function createVoiceFeedbackHandler ({
                 reply?.done?.()
                 return
             }
+            // The on-device wake word already fired, so this utterance is
+            // definitely addressed: light yellow NOW, before the (slow, ~10s on a
+            // small host) transcription, so the leaf visibly "thinks" for the
+            // whole STT run instead of going dark until the verdict. Deduped with
+            // the post-transcription yellow below.
+            let yellowShown = false
+            if (utterance?.wake?.fired === true) {
+                reply?.led?.('yellow')
+                yellowShown = true
+            }
             const { text, locale: detected } = await stt.transcribe({ ...utterance, locale })
             // Resolve which grammar(s) to parse against. With a real detected or
             // configured language, use just that. With 'auto' (whisper auto-detect,
@@ -115,8 +127,8 @@ export function createVoiceFeedbackHandler ({
                 reply?.done?.()
                 return
             }
-            // 1) wake word recognized -> yellow
-            reply?.led?.('yellow')
+            // 1) wake word recognized -> yellow (unless already lit pre-STT)
+            if (!yellowShown) reply?.led?.('yellow')
             if (intent.intent === 'unknown') {
                 // Addressed (the wake word fired) but the command was not
                 // understood — e.g. speaking a language the STT model can't
@@ -150,9 +162,15 @@ export function createVoiceFeedbackHandler ({
                 return
             }
             // 3) execute FIRST so the item exists ~700ms sooner, THEN play the
-            // confirm color. The dwell now sleeps purely for visual sequencing.
+            // confirm color. A fast execute would overwrite purple within
+            // milliseconds (making it invisible on the device — reported in the
+            // field), so pad purple up to dwell.command before switching to the
+            // verdict color. The item is already saved during the pad.
+            const purpleAt = Date.now()
             const result = await controller.execute(intent)
             log(`[voice] "${text}" -> ${result.intent} (${result.code})`)
+            const purpleElapsed = Date.now() - purpleAt
+            if (purpleElapsed < dwell.command) await sleep(dwell.command - purpleElapsed)
             reply?.led?.(result.ok ? 'green' : 'red')
             await sleep(result.ok ? dwell.hold : dwell.fail)
             reply?.done?.()
