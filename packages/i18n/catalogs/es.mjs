@@ -627,6 +627,7 @@ export const ES_MESSAGES = {
     'leaf.subtitle': 'Configura un dispositivo leaf cercano por Bluetooth.',
     'leaf.noHubs': 'Primero vincula un hub headless en Dispositivos propios: un leaf necesita un hub para sincronizar.',
     'leaf.selectHub': 'Hub con el que sincronizar',
+    'leaf.checkingHub': 'Comprobando el hub…',
     'leaf.hubNoBridge': 'Este hub no tiene un puente de leaf activo.',
     'leaf.wifiSsid': 'Nombre de Wi-Fi',
     'leaf.wifiPsk': 'Contrasena de Wi-Fi',
@@ -637,7 +638,7 @@ export const ES_MESSAGES = {
     'leaf.success': 'Leaf vinculado: se reiniciara y se conectara.',
     'leaf.failed': 'Fallo la vinculacion.',
     'leaf.notFound': 'No se encontro ningun leaf. Asegurate de que muestre una luz azul.',
-    'leaf.btUnavailable': 'El Bluetooth esta apagado o no disponible.',
+    'leaf.btUnavailable': 'El Bluetooth está desactivado o listam no tiene permiso de Bluetooth (revisa los Ajustes).',
     // Voice assistant (ASCII per catalog convention)
     'voice.feature.name': 'Asistente de voz',
     'voice.notesList.name': 'Notas de voz',

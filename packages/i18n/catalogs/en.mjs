@@ -627,6 +627,7 @@ export const EN_MESSAGES = {
     'leaf.subtitle': 'Set up a nearby leaf device over Bluetooth.',
     'leaf.noHubs': 'Pair a headless hub first under Owned devices — a leaf needs a hub to sync with.',
     'leaf.selectHub': 'Hub to sync with',
+    'leaf.checkingHub': 'Checking hub…',
     'leaf.hubNoBridge': 'This hub has no leaf bridge running.',
     'leaf.wifiSsid': 'Wi-Fi name',
     'leaf.wifiPsk': 'Wi-Fi password',
@@ -637,7 +638,7 @@ export const EN_MESSAGES = {
     'leaf.success': 'Leaf paired — it will reboot and connect.',
     'leaf.failed': 'Pairing failed.',
     'leaf.notFound': 'No leaf found. Make sure it shows a blue light.',
-    'leaf.btUnavailable': 'Bluetooth is off or unavailable.',
+    'leaf.btUnavailable': 'Bluetooth is off, or listam is missing the Bluetooth permission (check phone Settings).',
     // Voice assistant
     'voice.feature.name': 'Voice assistant',
     'voice.notesList.name': 'Voice notes',

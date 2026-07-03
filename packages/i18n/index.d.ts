@@ -493,6 +493,7 @@ export type MessageKey =
     | 'leaf.subtitle'
     | 'leaf.noHubs'
     | 'leaf.selectHub'
+    | 'leaf.checkingHub'
     | 'leaf.hubNoBridge'
     | 'leaf.wifiSsid'
     | 'leaf.wifiPsk'

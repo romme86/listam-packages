@@ -627,6 +627,7 @@ export const DE_MESSAGES = {
     'leaf.subtitle': 'Richte ein nahes Leaf-Gerät über Bluetooth ein.',
     'leaf.noHubs': 'Kopple zuerst einen Headless-Hub unter „Eigene Geräte“ — ein Leaf braucht einen Hub zum Synchronisieren.',
     'leaf.selectHub': 'Hub zum Synchronisieren',
+    'leaf.checkingHub': 'Hub wird geprüft…',
     'leaf.hubNoBridge': 'Auf diesem Hub läuft keine Leaf-Bridge.',
     'leaf.wifiSsid': 'WLAN-Name',
     'leaf.wifiPsk': 'WLAN-Passwort',
@@ -637,7 +638,7 @@ export const DE_MESSAGES = {
     'leaf.success': 'Leaf gekoppelt — es startet neu und verbindet sich.',
     'leaf.failed': 'Kopplung fehlgeschlagen.',
     'leaf.notFound': 'Kein Leaf gefunden. Achte auf ein blaues Licht.',
-    'leaf.btUnavailable': 'Bluetooth ist aus oder nicht verfügbar.',
+    'leaf.btUnavailable': 'Bluetooth ist aus oder listam fehlt die Bluetooth-Berechtigung (siehe Einstellungen).',
     // Voice assistant
     'voice.feature.name': 'Sprachassistent',
     'voice.notesList.name': 'Sprachnotizen',

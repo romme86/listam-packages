@@ -627,6 +627,7 @@ export const FR_MESSAGES = {
     'leaf.subtitle': 'Configurez un appareil leaf à proximité via Bluetooth.',
     'leaf.noHubs': 'Associez d’abord un hub headless dans Appareils possédés — un leaf a besoin d’un hub pour se synchroniser.',
     'leaf.selectHub': 'Hub de synchronisation',
+    'leaf.checkingHub': 'Vérification du hub…',
     'leaf.hubNoBridge': 'Ce hub n’a pas de passerelle leaf active.',
     'leaf.wifiSsid': 'Nom du Wi-Fi',
     'leaf.wifiPsk': 'Mot de passe Wi-Fi',
@@ -637,7 +638,7 @@ export const FR_MESSAGES = {
     'leaf.success': 'Leaf associé — il va redémarrer et se connecter.',
     'leaf.failed': 'Échec de l’association.',
     'leaf.notFound': 'Aucun leaf trouvé. Vérifiez qu’il affiche une lumière bleue.',
-    'leaf.btUnavailable': 'Le Bluetooth est désactivé ou indisponible.',
+    'leaf.btUnavailable': "Le Bluetooth est désactivé ou listam n'a pas l'autorisation Bluetooth (vérifiez les Réglages).",
     // Voice assistant
     'voice.feature.name': 'Assistant vocal',
     'voice.notesList.name': 'Notes vocales',
