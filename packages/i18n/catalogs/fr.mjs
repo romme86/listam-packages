@@ -115,6 +115,8 @@ export const FR_MESSAGES = {
     'ticket.block.empty': 'Ajoutez des notes, une liste de contrôle, un tableau et plus encore.',
     'ticket.block.insert': 'Insérer un bloc',
     'ticket.block.delete': 'Supprimer le bloc',
+    'ticket.block.turnInto': 'Transformer en…',
+    'ticket.block.options': 'Options du bloc',
     'ticket.block.move': 'Faites glisser pour réorganiser',
     'ticket.block.editHint': 'Cliquez pour modifier, cliquez ailleurs pour enregistrer.',
     'ticket.block.slashHint': 'Tapez / pour des blocs',

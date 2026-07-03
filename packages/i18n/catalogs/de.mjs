@@ -115,6 +115,8 @@ export const DE_MESSAGES = {
     'ticket.block.empty': 'Füge Notizen, eine Checkliste, eine Tabelle und mehr hinzu.',
     'ticket.block.insert': 'Block einfügen',
     'ticket.block.delete': 'Block löschen',
+    'ticket.block.turnInto': 'Umwandeln in …',
+    'ticket.block.options': 'Blockoptionen',
     'ticket.block.move': 'Zum Umsortieren ziehen',
     'ticket.block.editHint': 'Zum Bearbeiten klicken, zum Speichern wegklicken.',
     'ticket.block.slashHint': 'Tippe / für Blöcke',

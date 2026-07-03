@@ -265,6 +265,8 @@ export type MessageKey =
     | 'inspector.notePlaceholder'
     | 'inspector.value'
     | 'inspector.category'
+    | 'ticket.block.turnInto'
+    | 'ticket.block.options'
     | 'inspector.kicker'
     | 'inspector.addHint'
     | 'inspector.emptyHint'

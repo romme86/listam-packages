@@ -115,6 +115,8 @@ export const IT_MESSAGES = {
     'ticket.block.empty': 'Aggiungi note, una checklist, una tabella e altro ancora.',
     'ticket.block.insert': 'Inserisci blocco',
     'ticket.block.delete': 'Elimina blocco',
+    'ticket.block.turnInto': 'Trasforma in…',
+    'ticket.block.options': 'Opzioni blocco',
     'ticket.block.move': 'Trascina per riordinare',
     'ticket.block.editHint': 'Clicca per modificare, clicca altrove per salvare.',
     'ticket.block.slashHint': 'Digita / per i blocchi',
