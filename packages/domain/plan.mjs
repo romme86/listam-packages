@@ -71,13 +71,24 @@ export function toDateKey (ms) {
     return `${y}-${m}-${day}`
 }
 
-// Shift a date key by `days` (local calendar days). Used to build the 7-day strip
-// and "tomorrow" without re-deriving from ms. Returns '' for a malformed key.
+// Shift a date key by `days` (local calendar days). Used to build the day strip,
+// page it a week at a time, and derive "tomorrow" without re-deriving from ms.
+// Returns '' for a malformed key.
 export function shiftDateKey (dateKey, days) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str(dateKey))
     if (!m) return ''
     const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + numberOr(days, 0))
     return toDateKey(d.getTime())
+}
+
+// True when `dateKey` is a well-formed 'YYYY-MM-DD' strictly before `todayKey`.
+// Zero-padded ISO keys sort correctly as plain strings, so no Date round-trip.
+export function isPastDateKey (dateKey, todayKey) {
+    const a = str(dateKey)
+    const b = str(todayKey)
+    const ok = /^\d{4}-\d{2}-\d{2}$/
+    if (!ok.test(a) || !ok.test(b)) return false
+    return a < b
 }
 
 // Build the synced plan entry. `plannedFor` of '' clears the entry. The base
@@ -177,6 +188,25 @@ export function groupPlanByDate (reduced) {
         byDate.set(date, sorted)
     }
     return byDate
+}
+
+// The "carried over" set for `todayKey`: every reduced plan record parked on a
+// real past day (plannedFor < today). These surface under Today in the Overview
+// so unfinished work never silently drops off the edge of yesterday — a purely
+// DERIVED view: the stored plannedFor is never rewritten, so it stays
+// conflict-free, works offline, and keeps cascading forward each new day until
+// the source item is completed or the entry is re-planned. Sorted oldest day
+// first, then by that day's manual planOrder, so the most-overdue work floats to
+// the top. The caller joins each ref to its live source item and drops the ones
+// already done (a done past item just stays on its own past day).
+export function overduePlanRecords (reduced, todayKey) {
+    const values = reduced instanceof Map ? [...reduced.values()] : (Array.isArray(reduced) ? reduced : [])
+    return values
+        .filter((rec) => rec && isPastDateKey(rec.plannedFor, todayKey))
+        .sort((a, b) => {
+            if (a.plannedFor !== b.plannedFor) return a.plannedFor < b.plannedFor ? -1 : 1
+            return numberOr(a.planOrder, 0) - numberOr(b.planOrder, 0)
+        })
 }
 
 // Compute the planOrder writes to move a record within one day's ordered array.

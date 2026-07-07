@@ -28,6 +28,7 @@ export function planListKey (listId: string, listType?: string): string
 
 export function toDateKey (ms: number): string
 export function shiftDateKey (dateKey: string, days: number): string
+export function isPastDateKey (dateKey: string, todayKey: string): boolean
 
 export function buildPlanItem (args: {
     id: string
@@ -58,6 +59,7 @@ export function buildListPlanEntry (args: {
 
 export function reducePlan (items: unknown[] | null | undefined): Map<string, PlanRecord>
 export function groupPlanByDate (reduced: Map<string, PlanRecord> | PlanRecord[]): Map<string, PlanRecord[]>
+export function overduePlanRecords (reduced: Map<string, PlanRecord> | PlanRecord[], todayKey: string): PlanRecord[]
 export function computePlanReorder (
     orderedRecords: PlanRecord[],
     fromIndex: number,

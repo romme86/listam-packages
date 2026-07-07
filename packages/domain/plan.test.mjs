@@ -10,6 +10,8 @@ import {
     planListKey,
     toDateKey,
     shiftDateKey,
+    isPastDateKey,
+    overduePlanRecords,
     buildPlanItem,
     buildItemPlanEntry,
     buildListPlanEntry,
@@ -125,5 +127,38 @@ test('toDateKey / shiftDateKey are pure and consistent', () => {
     assert.equal(toDateKey(base), '2026-06-22')
     assert.equal(shiftDateKey('2026-06-22', 1), '2026-06-23')
     assert.equal(shiftDateKey('2026-06-30', 1), '2026-07-01')
+    assert.equal(shiftDateKey('2026-06-22', -1), '2026-06-21') // paging into the past
     assert.equal(shiftDateKey('bad', 1), '')
+})
+
+test('isPastDateKey compares zero-padded keys as strings, guarding format', () => {
+    assert.equal(isPastDateKey('2026-06-21', '2026-06-22'), true)
+    assert.equal(isPastDateKey('2026-06-22', '2026-06-22'), false) // today is not past
+    assert.equal(isPastDateKey('2026-06-23', '2026-06-22'), false) // future
+    assert.equal(isPastDateKey('2025-12-31', '2026-01-01'), true) // year rollover
+    assert.equal(isPastDateKey('', '2026-06-22'), false) // cleared entry never overdue
+    assert.equal(isPastDateKey('2026-06-21', 'bad'), false)
+})
+
+test('overduePlanRecords carries past-day entries, oldest-and-lowest-order first', () => {
+    const items = [
+        buildItemPlanEntry({ listId: 'd', itemId: 'today', plannedFor: '2026-06-22', planOrder: 1000, updatedAt: 1 }),
+        buildItemPlanEntry({ listId: 'd', itemId: 'future', plannedFor: '2026-06-25', planOrder: 1000, updatedAt: 1 }),
+        buildItemPlanEntry({ listId: 'd', itemId: 'yA', plannedFor: '2026-06-21', planOrder: 2000, updatedAt: 1 }),
+        buildItemPlanEntry({ listId: 'd', itemId: 'yB', plannedFor: '2026-06-21', planOrder: 1000, updatedAt: 1 }),
+        buildItemPlanEntry({ listId: 'd', itemId: 'old', plannedFor: '2026-06-19', planOrder: 1000, updatedAt: 1 }),
+    ]
+    const overdue = overduePlanRecords(reducePlan(items), '2026-06-22')
+    // Only the three past-day refs, and not today's / the future's.
+    assert.deepEqual(overdue.map((r) => r.refItemId), ['old', 'yB', 'yA'])
+})
+
+test('overduePlanRecords accepts a raw record array and ignores cleared entries', () => {
+    // A newest-but-empty entry is already dropped by reducePlan; passing the
+    // reduced map (not raw items) means cleared refs never appear as overdue.
+    const items = [
+        buildItemPlanEntry({ listId: 'd', itemId: 'a', plannedFor: '2026-06-20', updatedAt: 1 }),
+        buildItemPlanEntry({ listId: 'd', itemId: 'a', plannedFor: '', updatedAt: 9 }),
+    ]
+    assert.deepEqual(overduePlanRecords(reducePlan(items), '2026-06-22'), [])
 })
