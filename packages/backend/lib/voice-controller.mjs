@@ -13,7 +13,7 @@
 // (voice.result.* / voice.error.*) the caller can localize for a notice.
 
 import { NOTES_LIST_TYPE, DEFAULT_LIST_ID, DEFAULT_LIST_TYPE } from '@listam/domain/identity'
-import { reduceRegistry, isRegistryItem } from '@listam/domain/list-registry'
+import { reduceRegistry, isRegistryItem, resolveDefaultListTarget } from '@listam/domain/list-registry'
 import { isBoardType } from '@listam/domain/board'
 
 function fold (s) {
@@ -79,9 +79,15 @@ export function createVoiceController ({
             return { ok, intent: 'add_item', code: ok ? 'added' : 'notWritable', detail: { item, list: slots.list, listId: resolved.id } }
         }
 
-        const ok = await addItem(item, defaultListId, defaultListType)
-        log(ok ? `added "${item}" to default` : `add "${item}" failed`)
-        return { ok, intent: 'add_item', code: ok ? 'addedDefault' : 'notWritable', detail: { item } }
+        // No spoken list: honor the project's synced default-list preference
+        // (set from the app), falling back to the built-in default when unset or
+        // the chosen list was deleted. Read live each add so a change takes
+        // effect with no host restart.
+        const registry = (await getRegistryItems?.()) || []
+        const target = resolveDefaultListTarget(registry, { id: defaultListId, type: defaultListType })
+        const ok = await addItem(item, target.id, target.type)
+        log(ok ? `added "${item}" to default list (${target.id})` : `add "${item}" failed`)
+        return { ok, intent: 'add_item', code: ok ? 'addedDefault' : 'notWritable', detail: { item, listId: target.id } }
     }
 
     async function handleRemove (slots) {

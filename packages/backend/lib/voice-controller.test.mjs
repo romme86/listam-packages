@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createVoiceController, resolveListByName } from './voice-controller.mjs'
+import { buildProjectSettingsItem } from '@listam/domain/list-registry'
 
 const REGISTRY = [
     { id: 'groc1', listId: '__registry__', listType: 'registry', regKind: 'list', regName: 'Groceries', regType: 'shopping', updatedAt: 1 },
@@ -54,6 +55,33 @@ test('add_item without a list writes to the default list', async () => {
     assert.equal(r.ok, true)
     assert.equal(r.code, 'addedDefault')
     assert.equal(calls.add[0].listId, 'default')
+})
+
+test('add_item without a list honors the synced project default target', async () => {
+    const registry = [...REGISTRY, buildProjectSettingsItem({ defaultListId: 'groc1', defaultListType: 'shopping', updatedAt: 5 })]
+    const { ctl, calls } = makeController({ getRegistryItems: async () => registry })
+    const r = await ctl.execute({ intent: 'add_item', slots: { item: 'eggs', list: null } })
+    assert.equal(r.ok, true)
+    assert.equal(r.code, 'addedDefault')
+    assert.equal(calls.add[0].listId, 'groc1')
+    assert.equal(calls.add[0].listType, 'shopping')
+})
+
+test('synced default pointing at a now-deleted list falls back to the built-in default', async () => {
+    const registry = [...REGISTRY, buildProjectSettingsItem({ defaultListId: 'ghost', defaultListType: 'shopping', updatedAt: 5 })]
+    const { ctl, calls } = makeController({ getRegistryItems: async () => registry })
+    const r = await ctl.execute({ intent: 'add_item', slots: { item: 'eggs', list: null } })
+    assert.equal(r.ok, true)
+    assert.equal(calls.add[0].listId, 'default', 'never writes to a dangling target')
+})
+
+test('a spoken list still overrides the synced project default', async () => {
+    const registry = [...REGISTRY, buildProjectSettingsItem({ defaultListId: 'groc1', defaultListType: 'shopping', updatedAt: 5 })]
+    const { ctl, calls } = makeController({ getRegistryItems: async () => registry })
+    const r = await ctl.execute({ intent: 'add_item', slots: { item: 'eggs', list: 'Work Board' } })
+    assert.equal(r.ok, true)
+    assert.equal(r.code, 'added')
+    assert.equal(calls.add[0].listId, 'work1')
 })
 
 test('remove_item deletes exact matches across ALL lists', async () => {

@@ -3,10 +3,13 @@ import assert from 'node:assert/strict'
 import {
     REGISTRY_LIST_ID,
     REGISTRY_LIST_TYPE,
+    PROJECT_SETTINGS_ID,
     isRegistryItem,
     buildListMetaItem,
     buildGroupMetaItem,
+    buildProjectSettingsItem,
     reduceRegistry,
+    resolveDefaultListTarget,
     sanitizeView,
 } from './list-registry.mjs'
 
@@ -87,9 +90,9 @@ test('reduceRegistry drops tombstoned entries', () => {
 })
 
 test('reduceRegistry tolerates empty/garbage input', () => {
-    assert.deepEqual(reduceRegistry([]), { groups: [], lists: [] })
-    assert.deepEqual(reduceRegistry(null), { groups: [], lists: [] })
-    assert.deepEqual(reduceRegistry([null, { listType: 'shopping' }]), { groups: [], lists: [] })
+    assert.deepEqual(reduceRegistry([]), { groups: [], lists: [], settings: null })
+    assert.deepEqual(reduceRegistry(null), { groups: [], lists: [], settings: null })
+    assert.deepEqual(reduceRegistry([null, { listType: 'shopping' }]), { groups: [], lists: [], settings: null })
 })
 
 test('sanitizeView keeps only known keys with valid values', () => {
