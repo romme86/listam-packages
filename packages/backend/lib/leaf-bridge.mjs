@@ -100,9 +100,14 @@ export async function startLeafBridge({ port, host = '0.0.0.0', logger = console
     if (typeof interval.unref === 'function') interval.unref()
 
     const sockets = new Set()
+    // Leaf peers are anonymous TCP mirror replicas (no per-leaf key), so the bridge
+    // observes them only as a live count + when one last connected/disconnected —
+    // surfaced so a hub can show "N connected · last seen …" for its leaf.
+    let lastConnectAt = 0
+    let lastDisconnectAt = 0
     const notifyStatus = () => {
         try {
-            onStatus?.({ connections: sockets.size })
+            onStatus?.({ connections: sockets.size, lastConnectAt, lastDisconnectAt })
         } catch {
             // status listeners must never break replication
         }
@@ -113,6 +118,7 @@ export async function startLeafBridge({ port, host = '0.0.0.0', logger = console
         const remote = `${socket.remoteAddress ?? '?'}:${socket.remotePort ?? '?'}`
         logger.log(`[leaf-bridge] leaf connected from ${remote}`)
         sockets.add(socket)
+        lastConnectAt = Date.now()
         notifyStatus()
         const stream = store.replicate(false)
         // LISTAM_LEAF_BRIDGE_DEBUG=1: log per-chunk byte flow with timestamps,
@@ -143,6 +149,7 @@ export async function startLeafBridge({ port, host = '0.0.0.0', logger = console
         socket.on('close', () => {
             sockets.delete(socket)
             stream.destroy()
+            lastDisconnectAt = Date.now()
             logger.log(`[leaf-bridge] leaf disconnected ${remote}`)
             notifyStatus()
         })
