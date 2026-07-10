@@ -41,6 +41,10 @@
       "types": "./labels.d.ts",
       "default": "./labels.mjs"
     },
+    "./presence": {
+      "types": "./presence.d.ts",
+      "default": "./presence.mjs"
+    },
     "./list-move": {
       "types": "./list-move.d.ts",
       "default": "./list-move.mjs"
@@ -79,6 +83,8 @@
     "list-nav.d.ts",
     "labels.mjs",
     "labels.d.ts",
+    "presence.mjs",
+    "presence.d.ts",
     "list-move.mjs",
     "list-move.d.ts",
     "plan.mjs",

@@ -25,6 +25,11 @@
 // localized default. The reducers drop a newest-but-empty entry so a clear
 // propagates without needing a tombstone.
 
+// The synced presence/heartbeat channel lives in its own module; isLabelItem folds
+// it in below so every projection/nav/stray-list gate that already calls isLabelItem
+// skips presence too. One-directional: presence.mjs must NOT import labels.mjs.
+import { isPresenceItem } from './presence.mjs'
+
 export const PEER_LABEL_LIST_ID = '__peers__'
 export const PEER_LABEL_LIST_TYPE = 'peer'
 export const SURFACE_LABEL_LIST_ID = '__surfacenames__'
@@ -58,11 +63,14 @@ export function isValueReturnItem (item) {
     return !!item && typeof item === 'object' && item.listType === VALUE_RETURN_LIST_TYPE
 }
 
-// Any synced meta-item from this module — i.e. one that must never render as a
-// real list row or be picked up as a stray list by detectExtraLists / the nav
-// library. Kept separate from isRegistryItem so each predicate stays single-purpose.
+// Any synced meta-item that must never render as a real list row or be picked up as
+// a stray list by detectExtraLists / the nav library. Covers this module's label
+// channels AND the presence/heartbeat channel (presence.mjs), so every existing
+// gate that calls isLabelItem hides presence too. Kept separate from isRegistryItem
+// so each predicate stays single-purpose.
 export function isLabelItem (item) {
-    return isPeerLabelItem(item) || isSurfaceLabelItem(item) || isBuiltinGroupItem(item) || isValueReturnItem(item)
+    return isPeerLabelItem(item) || isSurfaceLabelItem(item) || isBuiltinGroupItem(item)
+        || isValueReturnItem(item) || isPresenceItem(item)
 }
 
 function numberOr (value, fallback) {

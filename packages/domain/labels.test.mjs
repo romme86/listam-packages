@@ -27,6 +27,7 @@ import {
 } from './labels.mjs'
 import { normalizeListItem } from './list-reducer.mjs'
 import { isRegistryItem } from './list-registry.mjs'
+import { buildPresenceItem } from './presence.mjs'
 
 test('buildPeerLabelItem produces a well-shaped, validator-safe item', () => {
     const it = buildPeerLabelItem({ writerKey: 'abc123', name: "Fabio's MacBook", updatedAt: 7 })
@@ -53,6 +54,15 @@ test('label items survive the strict reducer normalizer (so old peers accept the
     assert.ok(normalizeListItem(peer))
     assert.ok(normalizeListItem(surf))
     assert.equal(normalizeListItem(peer).listId, PEER_LABEL_LIST_ID)
+})
+
+test('presence items are label-skipped but stay out of the peer-label channel', () => {
+    const presence = buildPresenceItem({ writerKey: 'k9', lastActiveAt: 42 })
+    // Folded into isLabelItem so every projection/nav gate hides presence too...
+    assert.equal(isLabelItem(presence), true)
+    // ...but the peer-label reducer must not pick it up (channel isolation).
+    assert.equal(isPeerLabelItem(presence), false)
+    assert.equal(reducePeerLabels([presence]).size, 0)
 })
 
 test('surfaceLabelKey is stable and id-forming', () => {
