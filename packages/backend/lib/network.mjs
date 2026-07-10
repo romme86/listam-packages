@@ -193,6 +193,11 @@ function waitForWritable() {
             }
             logger.log('[INFO] Guest became writable after', attempts, 'attempt(s)')
 
+            // Rebroadcast the roster now that writable flipped true, so the
+            // frontend can advertise a device name that was set (and refused)
+            // while the base was still read-only. Cheap and idempotent.
+            broadcastMembershipRoster()
+
             // Phase 3: syncing — wait for main swarm peer connection
             if (swarm?.connections?.size > 0) {
                 // Already connected, done!
@@ -1098,6 +1103,7 @@ export function broadcastMembershipRoster(ctx = primaryContext) {
     const localWriterKey = ctx.autobase?.local?.key ? ctx.autobase.local.key.toString('hex') : null
     const roster = buildMembershipRoster(ctx.membershipState, {
         localWriterKey,
+        writable: !!ctx.autobase?.writable,
         hasOwnerAuthority: !!ctx.ownerAuthorityKeyPair && canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair),
     })
     broadcastMessage({ type: 'membership-roster', roster })

@@ -76,7 +76,7 @@ export function nextMembershipSequence(state) {
 // writers (owner first), which one is this device, the current epoch, and
 // whether the caller can administer (holds owner authority). Writer keys are
 // opaque public identifiers, not secrets.
-export function buildMembershipRoster(state, { localWriterKey = null, hasOwnerAuthority = false } = {}) {
+export function buildMembershipRoster(state, { localWriterKey = null, writable = false, hasOwnerAuthority = false } = {}) {
     const ownerWriterKey = state?.ownerWriterKey || null
     const selfKey = typeof localWriterKey === 'string' ? localWriterKey : null
 
@@ -98,6 +98,10 @@ export function buildMembershipRoster(state, { localWriterKey = null, hasOwnerAu
         // owner-signed writer set — so a device can advertise its synced peer
         // label the moment its base is writable, without waiting on membership.
         localWriterKey: selfKey,
+        // Whether this device's base can currently append. A write attempted
+        // while false is silently refused, so the frontend waits for this to
+        // flip true (the roster is rebroadcast then) before advertising its name.
+        writable: !!writable,
         writers,
     }
 }
