@@ -205,9 +205,12 @@ export const PT_MESSAGES = {
     'main.notification.undone': 'Anulado',
     'main.notification.nothingToUndo': 'Nada para anular',
     'main.notification.undoConflict': 'Não é possível anular — esse artigo mudou',
-    'main.deleteAll.title': 'Eliminar todos os artigos',
-    'main.deleteAll.message': 'Tem a certeza de que quer eliminar todos os artigos? Esta ação não pode ser anulada.',
-    'main.deleteAll.action': 'Eliminar tudo',
+    'main.deleteAll.title': 'Esvaziar esta lista',
+    'main.deleteAll.message': 'Eliminar todos os artigos desta lista? Esta ação não pode ser anulada.',
+    'main.deleteAll.action': 'Esvaziar lista',
+    'main.deleteList.title': 'Eliminar lista',
+    'main.deleteList.message': 'Eliminar esta lista e todos os seus artigos? Esta ação não pode ser anulada.',
+    'main.deleteList.action': 'Eliminar lista',
 
     'header.trialDaysLeft': {
         one: 'Falta {count} dia',
@@ -255,7 +258,8 @@ export const PT_MESSAGES = {
     'header.section.loyaltyCards': 'Cartões de fidelização',
     'header.action.scanLoyaltyCard': 'Digitalizar cartão de fidelização',
     'header.section.dangerZone': 'Zona de perigo',
-    'header.action.deleteAll': 'Eliminar tudo',
+    'header.action.deleteAll': 'Esvaziar esta lista',
+    'header.action.deleteList': 'Eliminar lista',
 
     'invite.dialog.title': 'Juntar-se com código de convite',
     'invite.dialog.subtitle': 'Cole o código de convite abaixo',

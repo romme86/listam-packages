@@ -205,9 +205,12 @@ export const FR_MESSAGES = {
     'main.notification.undone': 'Annulé',
     'main.notification.nothingToUndo': 'Rien à annuler',
     'main.notification.undoConflict': 'Annulation impossible : cet article a changé',
-    'main.deleteAll.title': 'Supprimer tous les articles',
-    'main.deleteAll.message': 'Voulez-vous vraiment supprimer tous les articles ? Cette action est irréversible.',
-    'main.deleteAll.action': 'Tout supprimer',
+    'main.deleteAll.title': 'Vider cette liste',
+    'main.deleteAll.message': 'Supprimer tous les articles de cette liste ? Cette action est irréversible.',
+    'main.deleteAll.action': 'Vider la liste',
+    'main.deleteList.title': 'Supprimer la liste',
+    'main.deleteList.message': 'Supprimer cette liste et tous ses articles ? Cette action est irréversible.',
+    'main.deleteList.action': 'Supprimer la liste',
 
     'header.trialDaysLeft': {
         one: '{count} jour restant',
@@ -255,7 +258,8 @@ export const FR_MESSAGES = {
     'header.section.loyaltyCards': 'Cartes de fidélité',
     'header.action.scanLoyaltyCard': 'Scanner une carte de fidélité',
     'header.section.dangerZone': 'Zone de danger',
-    'header.action.deleteAll': 'Tout supprimer',
+    'header.action.deleteAll': 'Vider cette liste',
+    'header.action.deleteList': 'Supprimer la liste',
 
     'invite.dialog.title': 'Rejoindre avec un code d\'invitation',
     'invite.dialog.subtitle': 'Collez le code d\'invitation ci-dessous',

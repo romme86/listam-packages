@@ -94,6 +94,10 @@ export function buildMembershipRoster(state, { localWriterKey = null, hasOwnerAu
         currentEpoch: Number(state?.currentEpoch) || 0,
         ownerWriterKey,
         canAdminister: !!hasOwnerAuthority,
+        // This device's own writer key, exposed even when it is not (yet) in the
+        // owner-signed writer set — so a device can advertise its synced peer
+        // label the moment its base is writable, without waiting on membership.
+        localWriterKey: selfKey,
         writers,
     }
 }

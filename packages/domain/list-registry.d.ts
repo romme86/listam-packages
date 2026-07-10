@@ -24,7 +24,7 @@ export interface ListTarget { id: string | null; type: string | null }
 
 export function isRegistryItem (item: unknown): boolean
 export function sanitizeView (view: unknown): Partial<RegistryListView>
-export function buildListMetaItem (args: { id: string; name: string; type?: string; groupId?: string | null; order?: number; view?: Partial<RegistryListView>; updatedAt: number }): Record<string, unknown>
+export function buildListMetaItem (args: { id: string; name: string; type?: string; groupId?: string | null; order?: number; view?: Partial<RegistryListView>; baseKey?: string | null; updatedAt: number }): Record<string, unknown>
 export function buildGroupMetaItem (args: { id: string; name: string; order?: number; updatedAt: number }): Record<string, unknown>
 export function buildProjectSettingsItem (args?: { defaultListId?: string | null; defaultListType?: string | null; updatedAt?: number }): Record<string, unknown>
 export function reduceRegistry (items: unknown[] | null | undefined): { groups: RegistryGroup[]; lists: RegistryList[]; settings: RegistrySettings | null }

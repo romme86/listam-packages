@@ -205,9 +205,12 @@ export const DE_MESSAGES = {
     'main.notification.undone': 'Rückgängig gemacht',
     'main.notification.nothingToUndo': 'Nichts rückgängig zu machen',
     'main.notification.undoConflict': 'Rückgängig nicht möglich – dieser Artikel wurde geändert',
-    'main.deleteAll.title': 'Alle Artikel löschen',
-    'main.deleteAll.message': 'Möchtest du wirklich alle Artikel löschen? Das lässt sich nicht rückgängig machen.',
-    'main.deleteAll.action': 'Alle löschen',
+    'main.deleteAll.title': 'Diese Liste leeren',
+    'main.deleteAll.message': 'Alle Artikel in dieser Liste löschen? Das lässt sich nicht rückgängig machen.',
+    'main.deleteAll.action': 'Liste leeren',
+    'main.deleteList.title': 'Liste löschen',
+    'main.deleteList.message': 'Diese Liste und alle ihre Artikel löschen? Das lässt sich nicht rückgängig machen.',
+    'main.deleteList.action': 'Liste löschen',
 
     'header.trialDaysLeft': {
         one: 'Noch {count} Tag',
@@ -255,7 +258,8 @@ export const DE_MESSAGES = {
     'header.section.loyaltyCards': 'Kundenkarten',
     'header.action.scanLoyaltyCard': 'Kundenkarte scannen',
     'header.section.dangerZone': 'Gefahrenzone',
-    'header.action.deleteAll': 'Alle löschen',
+    'header.action.deleteAll': 'Diese Liste leeren',
+    'header.action.deleteList': 'Liste löschen',
 
     'invite.dialog.title': 'Mit Einladungscode beitreten',
     'invite.dialog.subtitle': 'Füge den Einladungscode unten ein',

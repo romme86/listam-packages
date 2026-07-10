@@ -205,9 +205,12 @@ export const IT_MESSAGES = {
     'main.notification.undone': 'Annullato',
     'main.notification.nothingToUndo': 'Niente da annullare',
     'main.notification.undoConflict': 'Impossibile annullare: questo articolo è cambiato',
-    'main.deleteAll.title': 'Elimina tutti gli articoli',
-    'main.deleteAll.message': 'Sei sicuro di voler eliminare tutti gli articoli? L\'operazione non può essere annullata.',
-    'main.deleteAll.action': 'Elimina tutto',
+    'main.deleteAll.title': 'Svuota questa lista',
+    'main.deleteAll.message': 'Eliminare tutti gli articoli di questa lista? L\'operazione non può essere annullata.',
+    'main.deleteAll.action': 'Svuota lista',
+    'main.deleteList.title': 'Elimina lista',
+    'main.deleteList.message': 'Eliminare questa lista e tutti i suoi articoli? L\'operazione non può essere annullata.',
+    'main.deleteList.action': 'Elimina lista',
 
     'header.trialDaysLeft': {
         one: 'Rimane {count} giorno',
@@ -255,7 +258,8 @@ export const IT_MESSAGES = {
     'header.section.loyaltyCards': 'Carte fedeltà',
     'header.action.scanLoyaltyCard': 'Scansiona carta fedeltà',
     'header.section.dangerZone': 'Zona pericolosa',
-    'header.action.deleteAll': 'Elimina tutto',
+    'header.action.deleteAll': 'Svuota questa lista',
+    'header.action.deleteList': 'Elimina lista',
 
     'invite.dialog.title': 'Unisciti con codice di invito',
     'invite.dialog.subtitle': 'Incolla il codice di invito qui sotto',

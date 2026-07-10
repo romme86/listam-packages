@@ -205,9 +205,12 @@ export const ES_MESSAGES = {
     'main.notification.undone': 'Deshecho',
     'main.notification.nothingToUndo': 'Nada que deshacer',
     'main.notification.undoConflict': 'No se puede deshacer: ese elemento cambio',
-    'main.deleteAll.title': 'Eliminar todos los articulos',
-    'main.deleteAll.message': 'Seguro que quieres eliminar todos los articulos? Esto no se puede deshacer.',
-    'main.deleteAll.action': 'Eliminar todo',
+    'main.deleteAll.title': 'Vaciar esta lista',
+    'main.deleteAll.message': 'Eliminar todos los articulos de esta lista? Esto no se puede deshacer.',
+    'main.deleteAll.action': 'Vaciar lista',
+    'main.deleteList.title': 'Eliminar lista',
+    'main.deleteList.message': 'Eliminar esta lista y todos sus articulos? Esto no se puede deshacer.',
+    'main.deleteList.action': 'Eliminar lista',
 
     'header.trialDaysLeft': {
         one: 'Queda {count} dia',
@@ -255,7 +258,8 @@ export const ES_MESSAGES = {
     'header.section.loyaltyCards': 'Tarjetas de fidelidad',
     'header.action.scanLoyaltyCard': 'Escanear tarjeta',
     'header.section.dangerZone': 'Zona peligrosa',
-    'header.action.deleteAll': 'Eliminar todo',
+    'header.action.deleteAll': 'Vaciar esta lista',
+    'header.action.deleteList': 'Eliminar lista',
 
     'invite.dialog.title': 'Unirse con codigo de invitacion',
     'invite.dialog.subtitle': 'Pega el codigo de invitacion abajo',

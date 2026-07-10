@@ -205,9 +205,12 @@ export const EN_MESSAGES = {
     'main.notification.undone': 'Undone',
     'main.notification.nothingToUndo': 'Nothing to undo',
     'main.notification.undoConflict': 'Can’t undo — that item changed',
-    'main.deleteAll.title': 'Delete All Items',
-    'main.deleteAll.message': 'Are you sure you want to delete all items? This cannot be undone.',
-    'main.deleteAll.action': 'Delete All',
+    'main.deleteAll.title': 'Clear this list',
+    'main.deleteAll.message': 'Delete all items in this list? This cannot be undone.',
+    'main.deleteAll.action': 'Clear list',
+    'main.deleteList.title': 'Delete list',
+    'main.deleteList.message': 'Delete this list and all its items? This cannot be undone.',
+    'main.deleteList.action': 'Delete list',
 
     'header.trialDaysLeft': {
         one: '{count} day left',
@@ -255,7 +258,8 @@ export const EN_MESSAGES = {
     'header.section.loyaltyCards': 'Loyalty Cards',
     'header.action.scanLoyaltyCard': 'Scan Loyalty Card',
     'header.section.dangerZone': 'Danger Zone',
-    'header.action.deleteAll': 'Delete All',
+    'header.action.deleteAll': 'Clear this list',
+    'header.action.deleteList': 'Delete list',
 
     'invite.dialog.title': 'Join with Invite Code',
     'invite.dialog.subtitle': 'Paste the invite code below',
