@@ -33,7 +33,8 @@ import {
     RPC_JOIN_LIST
 } from '@listam/protocol'
 import b4a from 'b4a'
-import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain} from './lib/item.mjs'
+import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain, setMutationHook} from './lib/item.mjs'
+import { stopPresenceHeartbeat, writeHeartbeat, notePresenceInteraction } from './lib/presence-heartbeat.mjs'
 import {
     applyOperationToList,
     createListViewEntry,
@@ -319,6 +320,11 @@ export async function startBackend(platform) {
     // Rolling scheduled backups (15‑min / daily / weekly). No‑op until a backup
     // password is set; the catch‑up pass inside takes any tier that is due now.
     startScheduledBackups()
+
+    // A real user mutation stamps the presence heartbeat's lastInteractionAt (in
+    // memory; the next scheduled beat carries it — no extra write). The heartbeat
+    // itself is armed per-base by network.mjs's boot tail.
+    setMutationHook(notePresenceInteraction)
 
     const disposeTeardown = platform.onTeardown?.(shutdownBackend)
     return { paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown }
@@ -697,6 +703,12 @@ export async function shutdownBackend() {
     shutdownStarted = true
 
     logger.log('[INFO] Backend shutting down...')
+
+    // Flush a final presence beat while the swarm + base are still up, so last-seen
+    // and cumulative online time stay accurate across a clean shutdown. Best-effort
+    // and writable-gated; a crash loses at most one interval of accrual.
+    stopPresenceHeartbeat()
+    try { await writeHeartbeat({ final: true }) } catch (e) { logger.log('[WARNING] presence final flush failed:', e?.message ?? e) }
 
     // Close every shared single-list base before the personal base.
     stopScheduledBackups()

@@ -16,6 +16,7 @@ import { createViewCheckpoint } from './view-checkpoint.mjs'
 import { isBoardType, applyStatusTransition, doneStatusesOf, validateTicketDraft } from './board.mjs'
 import { buildMovedItem, isSameSurfaceMove } from './list-move.mjs'
 import { isInternalChannelItem } from './shared-creds.mjs'
+import { isPresenceItem } from '@listam/domain/presence'
 
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
 // One write chain PER BASE. The personal base uses the '__personal__' chain
@@ -26,6 +27,16 @@ import { isInternalChannelItem } from './shared-creds.mjs'
 // writes for FLUSHABLE_WAIT_MS instead of blocking the personal list too.
 const PERSONAL_CHAIN = '__personal__'
 const _writeChains = new Map()
+
+// Presence-freshness hook: presence-heartbeat.mjs registers a callback so a real
+// user mutation stamps its lastInteractionAt (in memory; carried by the next
+// scheduled beat, so no extra write). The presence heartbeat's own write is
+// excluded (see updateItem) so "last interaction" stays distinct from "last seen".
+let _mutationHook = null
+export function setMutationHook (fn) { _mutationHook = typeof fn === 'function' ? fn : null }
+function noteUserMutation () {
+    try { _mutationHook?.() } catch (e) { logger.log('[WARNING] presence mutation hook failed:', e?.message ?? e) }
+}
 
 // A read-through view of the write target's state: the personal globals (live
 // bindings, so a concurrent initAutobase re-init is still observed) when no
@@ -218,6 +229,7 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
         // }
 
         logger.log('[INFO] Added item')
+        noteUserMutation()
         return true
     }, ctx)
 }
@@ -274,6 +286,9 @@ export async function updateItem (item, ctx = null) {
         // }
 
         logger.log('[INFO] Updated item')
+        // Exclude the presence heartbeat's own write so lastInteractionAt tracks
+        // real user activity, not passive beats.
+        if (!isPresenceItem(item)) noteUserMutation()
         return true
     }, ctx)
 }
@@ -319,6 +334,7 @@ export async function deleteItem (item, ctx = null) {
         // }
 
         logger.log('[INFO] Deleted item')
+        noteUserMutation()
         return true
     }, ctx)
 }
@@ -414,6 +430,7 @@ export async function moveItem (payload, ctx = null) {
         }
 
         logger.log('[INFO] Moved item', { id: dest.id, from: source.listId, to: dest.listId, sameBucket })
+        noteUserMutation()
         return true
     }, ctx)
 }

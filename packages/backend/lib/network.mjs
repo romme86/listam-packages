@@ -72,6 +72,7 @@ import {
     setIsPendingJoinSuccess
 } from "./state.mjs"
 import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, rebuildExtraListItems, projectItemsToFrontend, readPersistedMembershipRecords, resetViewCheckpoint, syncListToFrontend } from "./item.mjs"
+import { startPresenceHeartbeat, pokePresence, resetPresenceAccounting } from "./presence-heartbeat.mjs"
 import { logger } from "./logger.mjs"
 import { getBackendFs } from './platform-fs.mjs'
 
@@ -197,6 +198,9 @@ function waitForWritable() {
             // frontend can advertise a device name that was set (and refused)
             // while the base was still read-only. Cheap and idempotent.
             broadcastMembershipRoster()
+            // Now that this guest can append, fire a presence beat so it shows
+            // online to peers without waiting a full heartbeat cadence.
+            pokePresence()
 
             // Phase 3: syncing — wait for main swarm peer connection
             if (swarm?.connections?.size > 0) {
@@ -539,6 +543,9 @@ export async function initAutobase(newBaseKey, options = {}) {
         // or base switch invalidates them.
         resetViewCheckpoint()
         resetApplyMembershipCheckpoint()
+        // Drop presence accounting too: the next base re-seeds its own totals and
+        // starts a fresh session (see startPresenceHeartbeat in the boot tail).
+        resetPresenceAccounting()
 
         const baseStoragePath = `${storagePath}-local`
 
@@ -664,6 +671,11 @@ export async function initAutobase(newBaseKey, options = {}) {
             syncListToFrontend(rebuiltList)
             projectItemsToFrontend(await rebuildExtraListItems())
             broadcastMembershipRoster()
+            // Base is up: (re-)arm the presence heartbeat, seeding this device's
+            // cumulative online time from its own last presence item. Idempotent;
+            // self-gates on writable+online, so a not-yet-writable guest simply
+            // beats once pokePresence() fires on the writable transition above.
+            await startPresenceHeartbeat()
         })()
         await new Promise((resolve) => {
             const timer = setTimeout(() => {
