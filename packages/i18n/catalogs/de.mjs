@@ -749,4 +749,11 @@ export const DE_MESSAGES = {
     'backup.schedule.tier.1w': 'Wöchentlich',
     'backup.schedule.tier.last': 'Letztes Backup: vor {time}',
     'backup.schedule.tier.never': 'Noch kein Backup',
+    'presence.onlineNow': 'Jetzt online',
+    'presence.lastSeen': 'Vor {ago} gesehen',
+    'presence.joined': 'Beigetreten {date}',
+    'presence.lastPing': 'Vor {ago} aktiv',
+    'presence.avgOnline': 'Ø {time} online',
+    'members.role.blind': 'Nur-Lese-Spiegel',
+    'members.role.leaf': 'Leaf',
 }

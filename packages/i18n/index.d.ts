@@ -761,6 +761,13 @@ export type MessageKey =
     | 'lists.menu.sectionName'
     | 'lists.menu.listNamePlaceholder'
     | 'lists.menu.boardNamePlaceholder'
+    | 'presence.onlineNow'
+    | 'presence.lastSeen'
+    | 'presence.joined'
+    | 'presence.lastPing'
+    | 'presence.avgOnline'
+    | 'members.role.blind'
+    | 'members.role.leaf'
 export type MessageCatalog = Record<MessageKey, MessageEntry>
 
 export const DEFAULT_LOCALE: 'en'
