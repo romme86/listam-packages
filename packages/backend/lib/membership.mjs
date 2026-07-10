@@ -25,6 +25,10 @@ export function createMembershipState() {
         writers: new Set(),
         writerEpochPublicKeys: new Map(),
         removedWriters: new Map(),
+        // writerKey -> createdAt (ms) of the FIRST bootstrap/add-writer record that
+        // authorized it: an owner-signed, non-forgeable "joined on" date. Surfaced
+        // per writer in buildMembershipRoster.
+        writerCreatedAt: new Map(),
     }
 }
 
@@ -38,6 +42,7 @@ export function cloneMembershipState(state) {
         writers: new Set(state?.writers || []),
         writerEpochPublicKeys: new Map(state?.writerEpochPublicKeys || []),
         removedWriters: new Map(state?.removedWriters || []),
+        writerCreatedAt: new Map(state?.writerCreatedAt || []),
     }
 }
 
@@ -84,6 +89,9 @@ export function buildMembershipRoster(state, { localWriterKey = null, writable =
         writerKey,
         isOwner: writerKey === ownerWriterKey,
         isSelf: !!selfKey && writerKey === selfKey,
+        // Owner-signed "joined on" date (ms) from the authorizing record, or null
+        // for an older base whose reducer never captured it.
+        joinedAt: state?.writerCreatedAt?.get(writerKey) ?? null,
     }))
     writers.sort((a, b) => {
         if (a.isOwner !== b.isOwner) return a.isOwner ? -1 : 1
@@ -247,6 +255,7 @@ export function reduceMembershipOperation(record, state = createMembershipState(
         next.currentEpochKeyHash = body.epochKeyHash || null
         next.writers.add(body.writerKey)
         if (body.epochPublicKey) next.writerEpochPublicKeys.set(body.writerKey, body.epochPublicKey)
+        if (!next.writerCreatedAt.has(body.writerKey)) next.writerCreatedAt.set(body.writerKey, body.createdAt)
         return accepted(next, null)
     }
 
@@ -261,6 +270,8 @@ export function reduceMembershipOperation(record, state = createMembershipState(
         const alreadyKnown = next.writers.has(body.writerKey)
         next.writers.add(body.writerKey)
         if (body.epochPublicKey) next.writerEpochPublicKeys.set(body.writerKey, body.epochPublicKey)
+        // First join wins: keep the earliest authorization date on a re-add.
+        if (!next.writerCreatedAt.has(body.writerKey)) next.writerCreatedAt.set(body.writerKey, body.createdAt)
         return accepted(next, alreadyKnown ? null : { addWriterKey: body.writerKey })
     }
 
@@ -287,6 +298,7 @@ export function reduceMembershipOperation(record, state = createMembershipState(
         next.currentEpochKeyHash = body.epochKeyHash
         next.writers.delete(body.writerKey)
         next.writerEpochPublicKeys.delete(body.writerKey)
+        next.writerCreatedAt.delete(body.writerKey)
         next.removedWriters.set(body.writerKey, {
             epoch: body.epoch,
             removedAt: body.createdAt,
