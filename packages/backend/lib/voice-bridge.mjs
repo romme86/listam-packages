@@ -18,6 +18,34 @@ const BYTES_PER_SAMPLE = 2 // PCM16
 // Hard cap so a noisy room / malicious leaf can't stream unbounded into memory.
 const DEFAULT_MAX_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 30 // 30 s
 
+// Peak-normalize a PCM16LE buffer toward `targetPeak` (fraction of full scale).
+// The leaf's INMP441 path runs quiet (measured speech peaks near -30 dBFS, at
+// the room's noise floor), which starves both whisper and any downstream model;
+// this lifts each utterance to a healthy level host-side, independent of the
+// firmware's own gain. Gain is capped so a near-silent (ambient-only) capture
+// is not amplified into loud noise, and never attenuates (gain >= 1). Returns
+// the input buffer untouched when no meaningful gain applies. Pure.
+export function normalizePcm16 (pcm, { targetPeak = 0.5, maxGain = 24 } = {}) {
+    if (!pcm || pcm.length < BYTES_PER_SAMPLE) return pcm
+    const samples = Math.floor(pcm.length / BYTES_PER_SAMPLE)
+    let peak = 0
+    for (let i = 0; i < samples; i++) {
+        const v = Math.abs((pcm[2 * i] | (pcm[2 * i + 1] << 8)) << 16 >> 16)
+        if (v > peak) peak = v
+    }
+    if (peak === 0) return pcm
+    const gain = Math.min(maxGain, (targetPeak * 32767) / peak)
+    if (gain <= 1.05) return pcm
+    const out = b4a.allocUnsafe(samples * BYTES_PER_SAMPLE)
+    for (let i = 0; i < samples; i++) {
+        const v = (pcm[2 * i] | (pcm[2 * i + 1] << 8)) << 16 >> 16
+        const scaled = Math.max(-32768, Math.min(32767, Math.round(v * gain)))
+        out[2 * i] = scaled & 0xff
+        out[2 * i + 1] = (scaled >> 8) & 0xff
+    }
+    return out
+}
+
 export function createUtteranceAssembler ({
     onUtterance,
     maxBytes = DEFAULT_MAX_BYTES,

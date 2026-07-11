@@ -3,13 +3,11 @@ import assert from 'node:assert/strict'
 import {
     REGISTRY_LIST_ID,
     REGISTRY_LIST_TYPE,
-    PROJECT_SETTINGS_ID,
     isRegistryItem,
     buildListMetaItem,
     buildGroupMetaItem,
-    buildProjectSettingsItem,
     reduceRegistry,
-    resolveDefaultListTarget,
+    isListNameTaken,
     sanitizeView,
 } from './list-registry.mjs'
 
@@ -89,10 +87,42 @@ test('reduceRegistry drops tombstoned entries', () => {
     assert.deepEqual(reg.lists.map((l) => l.id), ['a'])
 })
 
+test('the built-in default list is undeletable: its tombstone is ignored', () => {
+    // Any device (old code, bad actor, accident) may write regDeleted onto the
+    // built-in list's meta-item; the reducer must keep the list alive.
+    const builtin = { ...buildListMetaItem({ id: 'default', name: 'Spesa', type: 'shopping', order: 0, updatedAt: 5 }), regDeleted: true }
+    const reg = reduceRegistry([builtin])
+    assert.deepEqual(reg.lists.map((l) => l.id), ['default'])
+    assert.equal(reg.lists[0].name, 'Spesa')
+})
+
+test('a leftover settings meta-item (removed feature) is ignored', () => {
+    const leftover = {
+        id: '__projectsettings__', listId: REGISTRY_LIST_ID, listType: REGISTRY_LIST_TYPE,
+        regKind: 'settings', regDefaultListId: 'a', regDefaultListType: 'shopping', updatedAt: 9,
+    }
+    const live = buildListMetaItem({ id: 'a', name: 'Keep', type: 'shopping', order: 0, updatedAt: 1 })
+    const reg = reduceRegistry([leftover, live])
+    assert.deepEqual(reg.groups, [])
+    assert.deepEqual(reg.lists.map((l) => l.id), ['a'])
+})
+
+test('isListNameTaken folds case/accents/whitespace and honors excludeId', () => {
+    const items = [
+        buildListMetaItem({ id: 'spesa1', name: 'Spesa', type: 'shopping', order: 0, updatedAt: 1 }),
+        { ...buildListMetaItem({ id: 'gone', name: 'Vacanze', type: 'shopping', order: 1, updatedAt: 1 }), regDeleted: true },
+    ]
+    assert.equal(isListNameTaken(items, 'Spesa'), true)
+    assert.equal(isListNameTaken(items, '  spésa '), true)
+    assert.equal(isListNameTaken(items, 'Spesa', { excludeId: 'spesa1' }), false) // renaming itself
+    assert.equal(isListNameTaken(items, 'Vacanze'), false) // deleted lists do not block reuse
+    assert.equal(isListNameTaken(items, ''), false)
+})
+
 test('reduceRegistry tolerates empty/garbage input', () => {
-    assert.deepEqual(reduceRegistry([]), { groups: [], lists: [], settings: null })
-    assert.deepEqual(reduceRegistry(null), { groups: [], lists: [], settings: null })
-    assert.deepEqual(reduceRegistry([null, { listType: 'shopping' }]), { groups: [], lists: [], settings: null })
+    assert.deepEqual(reduceRegistry([]), { groups: [], lists: [] })
+    assert.deepEqual(reduceRegistry(null), { groups: [], lists: [] })
+    assert.deepEqual(reduceRegistry([null, { listType: 'shopping' }]), { groups: [], lists: [] })
 })
 
 test('sanitizeView keeps only known keys with valid values', () => {

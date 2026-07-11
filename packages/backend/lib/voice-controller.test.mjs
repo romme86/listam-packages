@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createVoiceController, resolveListByName } from './voice-controller.mjs'
-import { buildProjectSettingsItem } from '@listam/domain/list-registry'
 
 const REGISTRY = [
     { id: 'groc1', listId: '__registry__', listType: 'registry', regKind: 'list', regName: 'Groceries', regType: 'shopping', updatedAt: 1 },
@@ -57,31 +56,34 @@ test('add_item without a list writes to the default list', async () => {
     assert.equal(calls.add[0].listId, 'default')
 })
 
-test('add_item without a list honors the synced project default target', async () => {
-    const registry = [...REGISTRY, buildProjectSettingsItem({ defaultListId: 'groc1', defaultListType: 'shopping', updatedAt: 5 })]
-    const { ctl, calls } = makeController({ getRegistryItems: async () => registry })
+test('a leftover __projectsettings__ meta-item is ignored — built-in default always wins', async () => {
+    // The synced "default list" preference was removed 2026-07-11; bases still
+    // carrying its settings meta-item must not divert un-targeted adds.
+    const leftover = {
+        id: '__projectsettings__', listId: '__registry__', listType: 'registry',
+        regKind: 'settings', regDefaultListId: 'groc1', regDefaultListType: 'shopping', updatedAt: 5,
+    }
+    const { ctl, calls } = makeController({ getRegistryItems: async () => [...REGISTRY, leftover] })
     const r = await ctl.execute({ intent: 'add_item', slots: { item: 'eggs', list: null } })
     assert.equal(r.ok, true)
     assert.equal(r.code, 'addedDefault')
-    assert.equal(calls.add[0].listId, 'groc1')
+    assert.equal(calls.add[0].listId, 'default')
     assert.equal(calls.add[0].listType, 'shopping')
 })
 
-test('synced default pointing at a now-deleted list falls back to the built-in default', async () => {
-    const registry = [...REGISTRY, buildProjectSettingsItem({ defaultListId: 'ghost', defaultListType: 'shopping', updatedAt: 5 })]
-    const { ctl, calls } = makeController({ getRegistryItems: async () => registry })
-    const r = await ctl.execute({ intent: 'add_item', slots: { item: 'eggs', list: null } })
-    assert.equal(r.ok, true)
-    assert.equal(calls.add[0].listId, 'default', 'never writes to a dangling target')
-})
-
-test('a spoken list still overrides the synced project default', async () => {
-    const registry = [...REGISTRY, buildProjectSettingsItem({ defaultListId: 'groc1', defaultListType: 'shopping', updatedAt: 5 })]
-    const { ctl, calls } = makeController({ getRegistryItems: async () => registry })
+test('a spoken list overrides the default target', async () => {
+    const { ctl, calls } = makeController()
     const r = await ctl.execute({ intent: 'add_item', slots: { item: 'eggs', list: 'Work Board' } })
     assert.equal(r.ok, true)
     assert.equal(r.code, 'added')
     assert.equal(calls.add[0].listId, 'work1')
+})
+
+test('spoken list names shed leading "lista"/article fillers before resolving', () => {
+    assert.deepEqual(resolveListByName('lista Groceries', REGISTRY), { id: 'groc1', type: 'shopping' })
+    assert.deepEqual(resolveListByName('la lista della Groceries', REGISTRY), { id: 'groc1', type: 'shopping' })
+    // A name that IS just fillers still resolves by partial match, not to nothing.
+    assert.deepEqual(resolveListByName('groceries list', REGISTRY), { id: 'groc1', type: 'shopping' })
 })
 
 test('remove_item deletes exact matches across ALL lists', async () => {

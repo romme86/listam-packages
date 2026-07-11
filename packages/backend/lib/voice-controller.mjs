@@ -13,7 +13,7 @@
 // (voice.result.* / voice.error.*) the caller can localize for a notice.
 
 import { NOTES_LIST_TYPE, DEFAULT_LIST_ID, DEFAULT_LIST_TYPE } from '@listam/domain/identity'
-import { reduceRegistry, isRegistryItem, resolveDefaultListTarget } from '@listam/domain/list-registry'
+import { reduceRegistry, isRegistryItem } from '@listam/domain/list-registry'
 import { isBoardType } from '@listam/domain/board'
 
 function fold (s) {
@@ -25,10 +25,27 @@ function fold (s) {
         .trim()
 }
 
+// Filler words speakers wrap around a list name ("alla LISTA spesa", "la lista
+// DELLA spesa", "the shopping LIST"): stripped from the leading edge of the
+// spoken name so "lista spesa" resolves against a list simply named "Spesa".
+// Covers the six grammar locales; folding already lower-cased the tokens.
+const LIST_NAME_FILLERS = new Set([
+    'lista', 'liste', 'list', 'listas', 'lists', // "list" nouns
+    'la', 'le', 'il', 'lo', 'el', 'the', 'die', 'der', 'das', 'a', 'o', // articles
+    'di', 'de', 'del', 'della', 'delle', 'dello', 'dei', 'da', 'of', // partitives
+])
+
+function stripListFillers (folded) {
+    const words = folded.split(' ')
+    let start = 0
+    while (start < words.length - 1 && LIST_NAME_FILLERS.has(words[start])) start++
+    return words.slice(start).join(' ')
+}
+
 // Resolve a spoken list name to {id, type} against the synced registry.
 // Returns null (no match), 'ambiguous' (>1 match), or {id, type}.
 export function resolveListByName (name, registryItems) {
-    const target = fold(name)
+    const target = stripListFillers(fold(name))
     if (!target) return null
     const { lists } = reduceRegistry(registryItems || [])
     const exact = lists.filter((l) => fold(l.name) === target)
@@ -79,15 +96,13 @@ export function createVoiceController ({
             return { ok, intent: 'add_item', code: ok ? 'added' : 'notWritable', detail: { item, list: slots.list, listId: resolved.id } }
         }
 
-        // No spoken list: honor the project's synced default-list preference
-        // (set from the app), falling back to the built-in default when unset or
-        // the chosen list was deleted. Read live each add so a change takes
-        // effect with no host restart.
-        const registry = (await getRegistryItems?.()) || []
-        const target = resolveDefaultListTarget(registry, { id: defaultListId, type: defaultListType })
-        const ok = await addItem(item, target.id, target.type)
-        log(ok ? `added "${item}" to default list (${target.id})` : `add "${item}" failed`)
-        return { ok, intent: 'add_item', code: ok ? 'addedDefault' : 'notWritable', detail: { item, listId: target.id } }
+        // No spoken list: the built-in grocery list IS the destination. The
+        // per-project "default list" preference was removed (2026-07-11) — one
+        // undeletable built-in list receiving every un-targeted add is simpler
+        // and predictable across devices.
+        const ok = await addItem(item, defaultListId, defaultListType)
+        log(ok ? `added "${item}" to default list (${defaultListId})` : `add "${item}" failed`)
+        return { ok, intent: 'add_item', code: ok ? 'addedDefault' : 'notWritable', detail: { item, listId: defaultListId } }
     }
 
     async function handleRemove (slots) {

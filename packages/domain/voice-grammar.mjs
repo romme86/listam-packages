@@ -14,8 +14,11 @@ export const VOICE_LOCALES = ['en', 'es', 'de', 'fr', 'it', 'pt']
 // Leading wake words the leaf may include in the streamed pre-roll. Stripped
 // before parsing so "yo add milk" parses the same as "add milk". Mirrors the
 // on-device wake set (yo / hey listam / dai dai dai dai).
+// 'io' is whisper's dominant Italian mishearing of "yo" — accepted so a missed
+// on-device wake can still be rescued from the transcript. 'e' is NOT accepted:
+// ambient noise transcribes as "e" and would light the LED on every loud sound.
 export const WAKE_PHRASES = [
-    'yo', 'yoooo', 'yooo', 'yoo',
+    'yo', 'yoooo', 'yooo', 'yoo', 'io',
     'hey listam', 'hey, listam', 'a listam', 'hey listen',
     'dai dai dai dai', 'dai dai dai', 'dai dai',
 ]
@@ -45,7 +48,8 @@ const GRAMMARS = {
         note: { starts: ['note', 'nouvelle note', 'prends note'], ends: ['fin de la note', 'fin de note'] },
     },
     it: {
-        add: { verbs: ['aggiungi', 'metti'], joiners: ['a', 'alla', 'al', 'in', 'nella', 'nel'] },
+        // 'aggiungo' is a frequent whisper rendering of the imperative.
+        add: { verbs: ['aggiungi', 'aggiungo', 'metti'], joiners: ['a', 'alla', 'al', 'in', 'nella', 'nel'] },
         remove: { verbs: ['rimuovi', 'elimina', 'togli', 'cancella'] },
         note: { starts: ['nota', 'nuova nota', 'prendi nota'], ends: ['fine nota', 'fine della nota'] },
     },

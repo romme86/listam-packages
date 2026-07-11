@@ -78,13 +78,25 @@ test('on-device wake (utterance.wake.fired) executes even when STT mis-hears "yo
     assert.equal(ctrl.executed[0].intent, 'add_item')
 })
 
-test('WITHOUT on-device wake, the same mis-heard low-confidence add is still gated', async () => {
-    // The gate still protects ambient speech: no firmware wake + 0.6 < 0.75 floor.
+test('WITHOUT on-device wake, "io …" is rescued by the transcript wake alias', async () => {
+    // 2026-07-11: 'io' joined WAKE_PHRASES because whisper renders the spoken
+    // "yo" as the Italian "io" — so this transcript now counts as addressed and
+    // executes even when the firmware wake flag is missing.
     const ctrl = recordingController()
     const reply = recordingReply()
     await handlerFor(sttFor('io aggiungi latte', 'it'), ctrl)({}, reply)
+    assert.equal(ctrl.executed.length, 1)
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
+})
+
+test('WITHOUT on-device wake, a wake-less mishear ("e …") stays gated', async () => {
+    // 'e' is NOT a wake alias (ambient noise transcribes as "e"): no wake +
+    // lenient 0.6 < the 0.75 add floor -> gated, red verdict, nothing written.
+    const ctrl = recordingController()
+    const reply = recordingReply()
+    await handlerFor(sttFor('e aggiungi latte', 'it'), ctrl)({}, reply)
     assert.equal(ctrl.executed.length, 0)
-    assert.equal(reply.leds.includes('green'), false)
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
 })
 
 test('STT unavailable -> dark, just done', async () => {
@@ -95,11 +107,33 @@ test('STT unavailable -> dark, just done', async () => {
     assert.equal(reply.dones, 1)
 })
 
-test('STT throws -> red, and done still fires exactly once', async () => {
+test('STT throws on an unaddressed capture -> dark, done exactly once', async () => {
+    // No firmware wake fired, so nothing was lit pre-STT: a whisper crash on
+    // what is probably ambient noise must not blink red at the room.
     const reply = recordingReply()
     const stt = { available: async () => true, transcribe: async () => { throw new Error('whisper crashed') } }
     await handlerFor(stt)({}, reply)
-    assert.deepEqual(reply.leds, ['red'])
+    assert.deepEqual(reply.leds, [])
+    assert.equal(reply.dones, 1)
+})
+
+test('STT throws after an on-device wake -> yellow then red, done exactly once', async () => {
+    const reply = recordingReply()
+    const stt = { available: async () => true, transcribe: async () => { throw new Error('whisper crashed') } }
+    await handlerFor(stt)({ wake: { fired: true, prob: 0.99 } }, reply)
+    assert.deepEqual(reply.leds, ['yellow', 'red'])
+    assert.equal(reply.dones, 1)
+})
+
+test('STT slower than the budget -> red while the leaf still listens, done once', async () => {
+    const reply = recordingReply()
+    const stt = { available: async () => true, transcribe: () => new Promise(() => {}) } // never settles
+    const handler = createVoiceFeedbackHandler({
+        stt, controller: controllerOk, parseIntent, detectWake, locale: 'en',
+        dwellMs: { command: 0, hold: 0, fail: 0 }, sttTimeoutMs: 20,
+    })
+    await handler({ wake: { fired: true, prob: 0.99 } }, reply)
+    assert.deepEqual(reply.leds, ['yellow', 'red'])
     assert.equal(reply.dones, 1)
 })
 
@@ -121,9 +155,10 @@ test('ambient "please put the kettle on" parses to add 0.6 but is gated -> no sa
     const reply = recordingReply()
     const ctl = recordingController()
     await handlerFor(sttFor('please put the kettle on'), ctl)({}, reply)
-    // The parse still lights up (yellow=heard, purple=command) so on-device
-    // debugging shows it was understood, but it stops before green and never runs.
-    assert.deepEqual(reply.leds, ['yellow', 'purple'])
+    // The parse still lights up (yellow=heard, purple=command) and the gate now
+    // closes with an explicit red — "understood but not saved" — instead of
+    // going dark (which read as a hang). It stops before green and never runs.
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
     assert.equal(ctl.executed.length, 0, 'gated add must not execute')
     assert.equal(reply.dones, 1)
 })
@@ -132,7 +167,7 @@ test('ambient "take off your shoes" parses to remove 0.85 but is gated -> nothin
     const reply = recordingReply()
     const ctl = recordingController()
     await handlerFor(sttFor('take off your shoes'), ctl)({}, reply)
-    assert.deepEqual(reply.leds, ['yellow', 'purple'])
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
     assert.equal(ctl.executed.length, 0, 'destructive remove must not run on ambient speech')
     assert.equal(reply.dones, 1)
 })
@@ -141,7 +176,7 @@ test('bare "remove milk" without a wake word is gated (remove floor exceeds the 
     const reply = recordingReply()
     const ctl = recordingController()
     await handlerFor(sttFor('remove milk'), ctl)({}, reply)
-    assert.deepEqual(reply.leds, ['yellow', 'purple'])
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
     assert.equal(ctl.executed.length, 0, 'a wake word is required to delete')
 })
 

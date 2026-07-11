@@ -14,19 +14,18 @@
 // to avoid clashing with the base item shape.
 
 import { isBoardType, BOARD_LIST_TYPE } from './board.mjs'
+import { DEFAULT_LIST_ID } from './identity.mjs'
 
 export const REGISTRY_LIST_ID = '__registry__'
 export const REGISTRY_LIST_TYPE = 'registry'
 
 export const REG_KIND_LIST = 'list'
 export const REG_KIND_GROUP = 'group'
-// A singleton settings meta-item (one per project/base) carrying project-wide
-// preferences that must sync — currently the default target list for un-targeted
-// adds (voice "aggiungi X" with no spoken list; the app's quick-add). It rides
-// the same registry sync/LWW pipeline as lists and groups, so a new backend
-// record type is avoided. Fixed id so every peer's write LWW-merges onto one item.
-export const REG_KIND_SETTINGS = 'settings'
-export const PROJECT_SETTINGS_ID = '__projectsettings__'
+// NB: a 'settings' regKind (id '__projectsettings__') existed 2026-07-08 →
+// 2026-07-11 carrying a synced "default list for un-targeted adds" preference.
+// The feature was removed — un-targeted adds always land in the built-in
+// default list now — and the reducer simply ignores any leftover settings
+// meta-items still present in older bases.
 
 export function isRegistryItem (item) {
     return !!item && typeof item === 'object' && item.listType === REGISTRY_LIST_TYPE
@@ -102,52 +101,25 @@ export function buildGroupMetaItem ({ id, name, order = 0, updatedAt }) {
     }
 }
 
-// Build the singleton project-settings meta-item. `defaultListId`/`defaultListType`
-// name the list un-targeted adds land in; null/empty clears the preference (back
-// to the built-in default). Fixed id (PROJECT_SETTINGS_ID) so writes from any peer
-// LWW-merge onto one item.
-export function buildProjectSettingsItem ({ defaultListId = null, defaultListType = null, updatedAt } = {}) {
-    return {
-        id: PROJECT_SETTINGS_ID,
-        listId: REGISTRY_LIST_ID,
-        listType: REGISTRY_LIST_TYPE,
-        text: '',
-        isDone: false,
-        timeOfCompletion: 0,
-        updatedAt: numberOr(updatedAt, 0),
-        regKind: REG_KIND_SETTINGS,
-        regDefaultListId: typeof defaultListId === 'string' && defaultListId ? defaultListId : null,
-        regDefaultListType: typeof defaultListType === 'string' && defaultListType ? defaultListType : null,
-    }
-}
-
 // Reduce the current set of registry meta-items into ordered {groups, lists}.
 // The item pipeline already LWW-merges by id, but we dedupe defensively by
 // (kind,id) keeping the newest updatedAt so the function is correct on any
-// input. Tombstones (regDeleted === true) are dropped.
+// input. Tombstones (regDeleted === true) are dropped — EXCEPT on the built-in
+// default list, which is undeletable by design: a tombstone on it (from any
+// device, any code version) is ignored so the base grocery surface can never
+// disappear from the project.
 export function reduceRegistry (items) {
     const groups = new Map()
     const lists = new Map()
-    // Singleton settings, LWW by updatedAt. Null until a settings meta-item is seen.
-    let settings = null
-    let settingsAt = -1
 
     for (const item of (Array.isArray(items) ? items : [])) {
         if (!isRegistryItem(item)) continue
-        if (item.regDeleted === true) continue
+        const isBuiltinList = item.regKind === REG_KIND_LIST && item.id === DEFAULT_LIST_ID
+        if (item.regDeleted === true && !isBuiltinList) continue
         const id = typeof item.id === 'string' ? item.id : null
         if (!id) continue
         const updatedAt = numberOr(item.updatedAt, 0)
 
-        if (item.regKind === REG_KIND_SETTINGS) {
-            if (updatedAt < settingsAt) continue
-            settingsAt = updatedAt
-            settings = {
-                defaultListId: typeof item.regDefaultListId === 'string' && item.regDefaultListId ? item.regDefaultListId : null,
-                defaultListType: typeof item.regDefaultListType === 'string' && item.regDefaultListType ? item.regDefaultListType : null,
-            }
-            continue
-        }
         if (item.regKind === REG_KIND_GROUP) {
             const prev = groups.get(id)
             if (prev && numberOr(prev._at, 0) >= updatedAt) continue
@@ -183,29 +155,28 @@ export function reduceRegistry (items) {
     return {
         groups: [...groups.values()].map(strip).sort(byOrderThenName),
         lists: [...lists.values()].map(strip).sort(byOrderThenName),
-        // null when the project has never set a default; consumers fall back to
-        // the built-in default (see resolveDefaultListTarget).
-        settings,
     }
 }
 
-// Resolve the target for an un-targeted add (voice with no spoken list, quick-add)
-// against the synced project settings. Returns { id, type }. The chosen list is
-// honored only if it still exists in the registry — if it was deleted, or no
-// preference is set, this falls back to `fallback` (the built-in default the
-// caller supplies, e.g. identity's DEFAULT_LIST_ID / DEFAULT_LIST_TYPE).
-export function resolveDefaultListTarget (items, fallback = {}) {
-    const fid = typeof fallback.id === 'string' ? fallback.id : null
-    const ftype = typeof fallback.type === 'string' ? fallback.type : null
-    const { lists, settings } = reduceRegistry(items)
-    const wantId = settings?.defaultListId
-    if (wantId) {
-        const match = lists.find((l) => l.id === wantId)
-        if (match) {
-            // Prefer the stored type, else the list's own type, else fallback.
-            return { id: match.id, type: settings.defaultListType || match.type || ftype }
-        }
-        // The preferred list no longer exists — fall through to the built-in default.
-    }
-    return { id: fid, type: ftype }
+// Accent-/case-/whitespace-insensitive name folding for uniqueness checks.
+function foldName (s) {
+    return String(s ?? '')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim()
+}
+
+// True when a live (non-deleted) list in the registry already carries `name`
+// (folded compare, so "Spesa" == "spesa " == "Spésa"). Every create/rename UI
+// validates through this so a project can never hold two same-named lists —
+// duplicate names made spoken/name-based targeting ambiguous. `excludeId`
+// skips the list being renamed. Concurrent same-name creates on two offline
+// devices can still race past this; it guards the common, interactive path.
+export function isListNameTaken (items, name, { excludeId = null } = {}) {
+    const target = foldName(name)
+    if (!target) return false
+    const { lists } = reduceRegistry(items)
+    return lists.some((l) => l.id !== excludeId && foldName(l.name) === target)
 }

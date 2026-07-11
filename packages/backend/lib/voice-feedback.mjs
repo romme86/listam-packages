@@ -18,11 +18,20 @@
 // Short dwells between colors keep the sequence visible rather than collapsing
 // to a single final flash; they are injectable so tests run instantly.
 
+import { normalizePcm16 } from './voice-bridge.mjs'
+
 const sleep = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve())
 
 // hold (green) is deliberately long: the confirm arrives ~10s after the user
 // spoke (whisper latency), so a sub-second blink is easy to miss entirely.
 const DEFAULT_DWELL = { command: 350, hold: 1400, fail: 800 }
+
+// STT wall-clock budget. Must sit BELOW the leaf's post-END feedback window
+// (FEEDBACK_TIMEOUT = 25 s in voice.rs): a transcription that outlives the leaf's
+// patience would have its verdict written to an already-closed socket and
+// silently dropped — the "purple then nothing" failure. Timing out here instead
+// lets the leaf show red while it is still listening.
+const DEFAULT_STT_TIMEOUT_MS = 18000
 
 // Grammars tried when the spoken language is unknown ('auto'): the six UI
 // locales. Order is the tie-break preference when multiple would match.
@@ -68,6 +77,7 @@ export function createVoiceFeedbackHandler ({
     logger = null,
     dwellMs = DEFAULT_DWELL,
     execFloors = DEFAULT_EXEC_FLOORS,
+    sttTimeoutMs = DEFAULT_STT_TIMEOUT_MS,
 } = {}) {
     if (!stt || !controller || typeof parseIntent !== 'function' || typeof detectWake !== 'function') {
         throw new Error('createVoiceFeedbackHandler requires stt, controller, parseIntent, detectWake')
@@ -93,7 +103,32 @@ export function createVoiceFeedbackHandler ({
                 reply?.led?.('yellow')
                 yellowShown = true
             }
-            const { text, locale: detected } = await stt.transcribe({ ...utterance, locale })
+            // Host-side level repair: lift the quiet leaf capture to a healthy
+            // peak before transcription (see normalizePcm16). The dataset writer
+            // runs on the raw utterance, so training clips stay unmodified.
+            const prepared = { ...utterance, pcm: normalizePcm16(utterance.pcm), locale }
+            // Bound STT so a slow transcription fails visibly (red) while the
+            // leaf is still listening, instead of a verdict dropped on a closed
+            // socket. The loser of the race is left to settle in the background.
+            let sttTimer = null
+            const sttResult = await Promise.race([
+                stt.transcribe(prepared).catch((err) => ({ sttError: err })),
+                new Promise((resolve) => {
+                    sttTimer = setTimeout(() => resolve({ sttTimeout: true }), sttTimeoutMs)
+                }),
+            ])
+            if (sttTimer) clearTimeout(sttTimer)
+            if (sttResult?.sttTimeout || sttResult?.sttError) {
+                const why = sttResult.sttTimeout ? `timed out after ${sttTimeoutMs}ms` : (sttResult.sttError?.message ?? sttResult.sttError)
+                log(`[voice] transcription failed (${why})`)
+                if (yellowShown) {
+                    reply?.led?.('red')
+                    await sleep(dwell.fail)
+                }
+                reply?.done?.()
+                return
+            }
+            const { text, locale: detected } = sttResult
             // Resolve which grammar(s) to parse against. With a real detected or
             // configured language, use just that. With 'auto' (whisper auto-detect,
             // no language hint), try ALL supported grammars and keep the best parse
@@ -156,7 +191,11 @@ export function createVoiceFeedbackHandler ({
             // from silently mutating lists.
             if (!shouldExecuteIntent(intent, { wake, floors })) {
                 log(`[voice] "${text}" -> ${intent.intent} (conf ${intent.confidence}) gated: not addressed (no wake word, confidence below floor)`)
+                // End on an explicit RED: a gated command used to just go dark
+                // after purple ("purple then nothing"), which reads as a hang.
+                // Red tells the user "understood but not saved — re-address me".
                 await sleep(dwell.command)
+                reply?.led?.('red')
                 await sleep(dwell.fail)
                 reply?.done?.()
                 return

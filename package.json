@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test packages/*/*.test.mjs",
+    "test": "node --test packages/*/*.test.mjs packages/*/lib/*.test.mjs packages/*/lib/*/*.test.mjs",
     "publish:all": "node scripts/publish-all.mjs"
   },
   "repository": {
