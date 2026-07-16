@@ -8,9 +8,11 @@ test('normalizeTranscript folds accents, case, punctuation and whitespace', () =
     assert.equal(normalizeTranscript(undefined), '')
 })
 
-test('detectWake: true only when a wake phrase leads the transcript', () => {
-    assert.equal(detectWake('yo add milk'), true)
-    assert.equal(detectWake('YO, add milk'), true)
+test('detectWake: true only when a strong wake phrase leads the transcript', () => {
+    assert.equal(detectWake('yo petito add milk'), true)
+    assert.equal(detectWake('IO PETITO, aggiungi latte'), true)
+    assert.equal(detectWake('petito aggiungi latte'), true)
+    assert.equal(detectWake('yo add milk'), false)
     assert.equal(detectWake('hey listam take a note'), true)
     assert.equal(detectWake('dai dai dai dai add milk'), true)
     // bare command, no wake word -> not addressed by the wake check
@@ -78,7 +80,8 @@ test('note takes priority over command verbs inside the note body', () => {
 })
 
 test('leading wake words are stripped before parsing', () => {
-    assert.equal(parseIntent('yo add eggs to fridge').slots.item, 'eggs')
+    assert.equal(parseIntent('yo petito add eggs to fridge').slots.item, 'eggs')
+    assert.equal(parseIntent('petito add milk').slots.item, 'milk')
     assert.equal(parseIntent('hey listam remove butter').intent, 'remove_item')
     assert.equal(parseIntent('dai dai dai dai add salt').slots.item, 'salt')
 })
@@ -115,6 +118,13 @@ test('multilingual: italian add with accent folding', () => {
     assert.equal(r.intent, 'add_item')
     assert.equal(r.slots.item, 'latte')
     assert.equal(r.slots.list, 'spesa')
+})
+
+test('italian add tolerates common Whisper consonant-loss mishearings', () => {
+    const pannolini = parseIntent('io adungi pannolini', 'it')
+    assert.equal(pannolini.intent, 'add_item')
+    assert.deepEqual(pannolini.slots, { item: 'pannolini', list: null })
+    assert.equal(parseIntent('agiungi riso', 'it').intent, 'add_item')
 })
 
 test('multilingual: spanish add and remove', () => {

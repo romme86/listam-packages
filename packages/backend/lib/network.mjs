@@ -75,10 +75,12 @@ import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, 
 import { startPresenceHeartbeat, pokePresence, resetPresenceAccounting } from "./presence-heartbeat.mjs"
 import { logger } from "./logger.mjs"
 import { getBackendFs } from './platform-fs.mjs'
+import { recoverEpochKeyFromMembership } from './epoch-recovery.mjs'
 
 let _initPromise = null
 let _writableCheckTimer = null
 let inviteUsesRemaining = 0
+let _joinedBase = false
 
 // Network-status reporting (the header readiness dot). Each initAutobase pass
 // builds a fresh swarm; _netStatusGen guards listeners so a torn-down base's
@@ -536,6 +538,7 @@ export async function initAutobase(newBaseKey, options = {}) {
         }
 
         await tearDownAutobaseSwarmStore()
+        _joinedBase = false
         setMembershipState(createMembershipState())
         setCurrentInvite(null)
         inviteUsesRemaining = 0
@@ -580,6 +583,7 @@ export async function initAutobase(newBaseKey, options = {}) {
             scopedWriterKeyPair = await loadScopedWriterKeyPair(baseKey)
             if (scopedWriterKeyPair) logger.log('[INFO] Using joined-base scoped local writer')
         }
+        _joinedBase = Boolean(scopedWriterKeyPair)
 
         const autobaseOpts = {
             // The personal base reduces through the shared apply(), bound to the
@@ -664,13 +668,27 @@ export async function initAutobase(newBaseKey, options = {}) {
         // membership and list state land, and the frontend gets synced late).
         const bootViewTail = (async () => {
             const persistedMembership = await readPersistedMembershipRecords()
-            setMembershipState(reduceMembershipLog(persistedMembership, { baseKey: autobase.key }))
+            const epochRecovery = recoverEpochKeyFromMembership(persistedMembership, {
+                baseKey: autobase.key,
+                localWriterKey: autobase.local?.key?.toString('hex'),
+                epochEncryptionKeyPair,
+                currentEpochKey: epochKey,
+            })
+            setMembershipState(epochRecovery.state)
+            if (epochRecovery.recovered) {
+                setEpochKey(epochRecovery.epochKey)
+                await saveEpochKey(epochRecovery.epochKey)
+                logger.log('[INFO] Recovered current epoch key from persisted membership grant', {
+                    epoch: epochRecovery.state.currentEpoch,
+                })
+            }
             await ensureOwnerMembership({ allowOwnerMigration })
             const rebuiltList = await rebuildListFromPersistedOps()
             setCurrentList(rebuiltList)
             syncListToFrontend(rebuiltList)
             projectItemsToFrontend(await rebuildExtraListItems())
             broadcastMembershipRoster()
+            broadcastBaseState()
             // Base is up: (re-)arm the presence heartbeat, seeding this device's
             // cumulative online time from its own last presence item. Idempotent;
             // self-gates on writable+online, so a not-yet-writable guest simply
@@ -769,7 +787,7 @@ export async function initAutobase(newBaseKey, options = {}) {
         // Tell clients whether this base was joined as a guest (the scoped
         // writer exists only for joined bases): a restarted guest must keep
         // reporting joined without ever seeing a live join-success event.
-        broadcastMessage({ type: 'base-state', joined: Boolean(scopedWriterKeyPair) })
+        broadcastBaseState()
     })()
 
     try {
@@ -777,6 +795,15 @@ export async function initAutobase(newBaseKey, options = {}) {
     } finally {
         _initPromise = null
     }
+}
+
+export function broadcastBaseState() {
+    broadcastMessage({
+        type: 'base-state',
+        joined: _joinedBase,
+        baseId: autobase?.key ? secretFingerprint(autobase.key.toString('hex')) : null,
+        epoch: Number(membershipState?.currentEpoch) || 0,
+    })
 }
 
 // Park the backend in a non-destructive degraded state after a corrupt

@@ -30,23 +30,31 @@ const handlerFor = (stt, controller = controllerOk, opts = {}) => createVoiceFee
 
 test('wake + command + save -> yellow, purple, green', async () => {
     const reply = recordingReply()
-    await handlerFor(sttFor('yo add milk'))({ pcm: Buffer.alloc(0) }, reply)
+    await handlerFor(sttFor('yo petito add milk'))({ pcm: Buffer.alloc(0) }, reply)
     assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
     assert.equal(reply.dones, 1)
 })
 
-test('anchored "add milk" without a wake word clears the floor (0.75) -> executes', async () => {
-    // Hands-free add still works: the anchored grammar yields 0.75, == the add
-    // floor, so it executes and saves even with no wake word.
+test('direct petito command authorizes the fast capture path', async () => {
     const reply = recordingReply()
-    await handlerFor(sttFor('add milk'))({}, reply)
+    const ctrl = recordingController()
+    await handlerFor(sttFor('petito add milk'), ctrl)({ wake: { fired: false, prob: 0.02 } }, reply)
     assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
+    assert.equal(ctrl.executed.length, 1)
+})
+
+test('anchored "add milk" without the full wake phrase is gated', async () => {
+    const reply = recordingReply()
+    const ctrl = recordingController()
+    await handlerFor(sttFor('add milk'), ctrl)({}, reply)
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
+    assert.equal(ctrl.executed.length, 0)
     assert.equal(reply.dones, 1)
 })
 
 test('wake word only (no command) -> yellow then red (heard but not understood)', async () => {
     const reply = recordingReply()
-    await handlerFor(sttFor('yo'))({}, reply)
+    await handlerFor(sttFor('yo petito'))({}, reply)
     assert.deepEqual(reply.leds, ['yellow', 'red'])
     assert.equal(reply.dones, 1)
 })
@@ -60,31 +68,23 @@ test('ambient speech (no wake, no command) -> dark, just done', async () => {
 
 test('command recognized but save fails -> yellow, purple, red', async () => {
     const reply = recordingReply()
-    await handlerFor(sttFor('yo add milk'), controllerFail)({}, reply)
+    await handlerFor(sttFor('yo petito add milk'), controllerFail)({}, reply)
     assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
     assert.equal(reply.dones, 1)
 })
 
-test('on-device wake (utterance.wake.fired) executes even when STT mis-hears "yo" as "io"', async () => {
-    // Real case: the leaf microWakeWord fires (0.996), but whisper transcribes
-    // the spoken "yo" as the Italian "io" -> text detectWake fails and the parse
-    // is only the 0.6 lenient retry. The firmware-reported wake must still let it
-    // through, or Italian voice adds silently gate.
+test('on-device yo alone opens capture but cannot authorize a mutation', async () => {
     const ctrl = recordingController()
     const reply = recordingReply()
     await handlerFor(sttFor('io aggiungi latte', 'it'), ctrl)({ wake: { fired: true, prob: 0.996 } }, reply)
-    assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
-    assert.equal(ctrl.executed.length, 1)
-    assert.equal(ctrl.executed[0].intent, 'add_item')
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
+    assert.equal(ctrl.executed.length, 0)
 })
 
-test('WITHOUT on-device wake, "io …" is rescued by the transcript wake alias', async () => {
-    // 2026-07-11: 'io' joined WAKE_PHRASES because whisper renders the spoken
-    // "yo" as the Italian "io" — so this transcript now counts as addressed and
-    // executes even when the firmware wake flag is missing.
+test('full "io petito" transcript authorizes when Whisper mishears yo', async () => {
     const ctrl = recordingController()
     const reply = recordingReply()
-    await handlerFor(sttFor('io aggiungi latte', 'it'), ctrl)({}, reply)
+    await handlerFor(sttFor('io petito aggiungi latte', 'it'), ctrl)({}, reply)
     assert.equal(ctrl.executed.length, 1)
     assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
 })
@@ -180,39 +180,39 @@ test('bare "remove milk" without a wake word is gated (remove floor exceeds the 
     assert.equal(ctl.executed.length, 0, 'a wake word is required to delete')
 })
 
-test('a clean wake word bypasses the floor — "yo um add milk" (lenient 0.6) executes', async () => {
-    // The lenient retry exists to recover a mis-heard wake ("yup add milk"); when a
-    // real wake word IS present, even a 0.6 parse should run.
+test('a full wake phrase bypasses the floor for a lenient parse', async () => {
     const reply = recordingReply()
     const ctl = recordingController()
-    await handlerFor(sttFor('yo um add milk'), ctl)({}, reply)
+    await handlerFor(sttFor('yo petito um add milk'), ctl)({}, reply)
     assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
     assert.equal(ctl.executed.length, 1)
     assert.equal(ctl.executed[0].intent, 'add_item')
 })
 
-test('a clean wake word executes a destructive remove — "yo remove milk"', async () => {
+test('a full wake phrase executes a destructive remove', async () => {
     const reply = recordingReply()
     const ctl = recordingController()
-    await handlerFor(sttFor('yo remove milk'), ctl)({}, reply)
+    await handlerFor(sttFor('yo petito remove milk'), ctl)({}, reply)
     assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
     assert.equal(ctl.executed.length, 1)
     assert.equal(ctl.executed[0].intent, 'remove_item')
 })
 
-test('a full note (0.95, both markers) clears the note floor without a wake word', async () => {
+test('a full note without the wake phrase is still gated', async () => {
     const reply = recordingReply()
     const ctl = recordingController()
     await handlerFor(sttFor('note buy a gift end note'), ctl)({}, reply)
-    assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
-    assert.equal(ctl.executed.length, 1)
-    assert.equal(ctl.executed[0].intent, 'note')
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
+    assert.equal(ctl.executed.length, 0)
 })
 
-test('floors are configurable — loosening the add floor lets a 0.6 parse through', async () => {
+test('legacy wake-optional mode can still use configurable floors', async () => {
     const reply = recordingReply()
     const ctl = recordingController()
-    await handlerFor(sttFor('please put the kettle on'), ctl, { execFloors: { add_item: 0.5 } })({}, reply)
+    await handlerFor(sttFor('please put the kettle on'), ctl, {
+        execFloors: { add_item: 0.5 },
+        requireWakePhrase: false,
+    })({}, reply)
     assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
     assert.equal(ctl.executed.length, 1, 'a lower floor admits the lenient add')
 })
@@ -233,13 +233,15 @@ test('shouldExecuteIntent: wake bypasses the floor, unknown never runs', () => {
     assert.equal(shouldExecuteIntent(null, { wake: true }), false)
 })
 
-test('shouldExecuteIntent: without wake, per-intent floors apply (remove stricter than add)', () => {
-    assert.equal(shouldExecuteIntent({ intent: 'add_item', confidence: 0.75 }, {}), true)
-    assert.equal(shouldExecuteIntent({ intent: 'add_item', confidence: 0.6 }, {}), false)
+test('shouldExecuteIntent: wake-optional mode retains per-intent floors', () => {
+    const legacy = { requireWakePhrase: false }
+    assert.equal(shouldExecuteIntent({ intent: 'add_item', confidence: 0.75 }, {}), false)
+    assert.equal(shouldExecuteIntent({ intent: 'add_item', confidence: 0.75 }, legacy), true)
+    assert.equal(shouldExecuteIntent({ intent: 'add_item', confidence: 0.6 }, legacy), false)
     // 0.85 is the grammar's max for an anchored remove — still below the 0.9 floor.
-    assert.equal(shouldExecuteIntent({ intent: 'remove_item', confidence: 0.85 }, {}), false)
-    assert.equal(shouldExecuteIntent({ intent: 'note', confidence: 0.7 }, {}), false)
-    assert.equal(shouldExecuteIntent({ intent: 'note', confidence: 0.95 }, {}), true)
+    assert.equal(shouldExecuteIntent({ intent: 'remove_item', confidence: 0.85 }, legacy), false)
+    assert.equal(shouldExecuteIntent({ intent: 'note', confidence: 0.7 }, legacy), false)
+    assert.equal(shouldExecuteIntent({ intent: 'note', confidence: 0.95 }, legacy), true)
 })
 
 test('shouldExecuteIntent: defaults match DEFAULT_EXEC_FLOORS and remove is the strictest', () => {

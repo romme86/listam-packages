@@ -33,15 +33,15 @@ import {
     RPC_JOIN_LIST
 } from '@listam/protocol'
 import b4a from 'b4a'
-import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain, setMutationHook} from './lib/item.mjs'
-import { stopPresenceHeartbeat, writeHeartbeat, notePresenceInteraction } from './lib/presence-heartbeat.mjs'
+import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain, setMutationHook} from './lib/item.mjs'
+import { stopPresenceHeartbeat, writeHeartbeat, notePresenceInteraction, pokePresence } from './lib/presence-heartbeat.mjs'
 import {
     applyOperationToList,
     createListViewEntry,
     normalizeListOperation,
 } from './lib/list-reducer.mjs'
 import {loadAutobaseKey, saveAutobaseKey, loadEncryptionKey, saveEncryptionKey, loadOwnerAuthorityKey, saveOwnerAuthorityKey, deleteLegacyKeyFile, deleteLegacyInviteFile, loadEpochKey, saveEpochKey, deleteEpochKey, loadEpochEncryptionKey, saveEpochEncryptionKey} from "./lib/key.mjs"
-import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, broadcastMembershipRoster, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery} from "./lib/network.mjs"
+import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery} from "./lib/network.mjs"
 import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
@@ -460,8 +460,20 @@ async function handleFrontendRequest(req, error) {
             }
             case RPC_REQUEST_SYNC: {
                 logger.log('[INFO] Command RPC_REQUEST_SYNC - frontend requesting current list')
-                syncListToFrontend()
+                // Reconcile the materialized view first. `currentList` is only an
+                // in-memory projection and can lag after a suspended mobile
+                // worklet or a dropped renderer event; recovery must answer from
+                // the durable view, never echo stale memory back to the client.
+                const rebuiltList = await rebuildListFromPersistedOps()
+                setCurrentList(rebuiltList)
+                syncListToFrontend(rebuiltList)
                 projectItemsToFrontend(await rebuildExtraListItems())
+                broadcastMembershipRoster()
+                broadcastBaseState()
+                // Foreground catch-up doubles as an immediate online assertion.
+                // pokePresence self-gates on writable/network and coalesces with
+                // a recent heartbeat, so this is cheap and append-safe.
+                pokePresence()
                 break
             }
             case RPC_CONTROL_LIST: {

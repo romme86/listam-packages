@@ -5,8 +5,8 @@
 // The leaf LED is DARK on the on-device loudness gate; it lights only from the
 // frames emitted here via `reply` (a per-connection channel from audio-bridge):
 //   yellow = wake word recognized · purple = command recognized ·
-//   green = saved (red = error). No wake word AND no parseable command => the
-//   utterance was ambient noise, so nothing lights. A command can be parsed
+//   green = saved (red = error). No address phrase AND no parseable command =>
+//   the utterance was ambient noise, so nothing lights. A command can be parsed
 //   (yellow→purple) yet still be GATED before green/save — see shouldExecuteIntent
 //   and DEFAULT_EXEC_FLOORS — so a likely false positive lights up but never
 //   mutates a list.
@@ -37,20 +37,18 @@ const DEFAULT_STT_TIMEOUT_MS = 18000
 // locales. Order is the tie-break preference when multiple would match.
 const AUTO_LANGS = ['en', 'it', 'es', 'de', 'fr', 'pt']
 
-// Write gate (NOT the LED): which parsed commands are allowed to actually execute
-// and save. There is no real wake-word model yet — the leaf only has a loudness
-// (dB) gate and sends wakeWordId=1 unconditionally (microWakeWord is deferred), so
-// ambient speech that happens to parse reaches the host. A clean wake word means
-// the user clearly addressed the device, so any recognized command runs. WITHOUT
-// a wake word, the parse confidence must clear a per-intent floor:
+// Write gate (NOT the LED): which parsed commands may execute and save. The
+// on-device microWakeWord model recognizes a deliberately short "yo", useful as
+// a low-latency capture trigger but too weak to authorize mutations. By default
+// the host therefore requires "petito" or the longer phrase "yo petito".
+// Per-intent floors remain available for explicit legacy wake-optional mode:
 //   • add_item / note (non-destructive): 0.75 — the anchored "add milk" (0.75)
 //     still works hands-free, but the 0.6 lenient-retry path is excluded.
 //   • remove_item (DESTRUCTIVE): 0.9 — above the grammar's max for a remove
 //     (anchored remove is 0.85), so a wake word is effectively required to delete.
 //     handleRemove deletes by substring match, so an ambient "take off your shoes"
 //     must never reach it.
-// Floors are configurable (config.voice.execConfidence) so the policy can be
-// loosened/tightened without code changes once a real wake-word model exists.
+// Floors are configurable through config.voice.execConfidence.
 export const DEFAULT_EXEC_FLOORS = Object.freeze({
     add_item: 0.75,
     remove_item: 0.9,
@@ -58,11 +56,11 @@ export const DEFAULT_EXEC_FLOORS = Object.freeze({
 })
 
 // Decide whether a parsed intent may execute. Pure so the policy unit-tests in
-// isolation. `wake` short-circuits the floor (the user said the wake word); an
-// unknown intent never executes; otherwise confidence must clear the per-intent
-// floor (intents with no floor entry require an unreachable 1.0, i.e. wake-only).
-export function shouldExecuteIntent (intent, { wake = false, floors = DEFAULT_EXEC_FLOORS } = {}) {
+// isolation. `wake` means the full host-confirmed address phrase, not merely an
+// on-device trigger. An unknown intent never executes.
+export function shouldExecuteIntent (intent, { wake = false, floors = DEFAULT_EXEC_FLOORS, requireWakePhrase = true } = {}) {
     if (!intent || intent.intent === 'unknown') return false
+    if (requireWakePhrase && !wake) return false
     if (wake) return true
     const floor = floors[intent.intent] ?? 1
     return Number(intent.confidence) >= floor
@@ -77,6 +75,7 @@ export function createVoiceFeedbackHandler ({
     logger = null,
     dwellMs = DEFAULT_DWELL,
     execFloors = DEFAULT_EXEC_FLOORS,
+    requireWakePhrase = true,
     sttTimeoutMs = DEFAULT_STT_TIMEOUT_MS,
 } = {}) {
     if (!stt || !controller || typeof parseIntent !== 'function' || typeof detectWake !== 'function') {
@@ -146,17 +145,18 @@ export function createVoiceFeedbackHandler ({
                     lang = candidate
                 }
             }
-            // Trust the ON-DEVICE wake word (microWakeWord) when the firmware
-            // reports it fired: the STT often mis-transcribes the spoken "yo"
-            // (e.g. as the Italian "io"), so a text-only detectWake would wrongly
-            // gate a command the leaf already confirmed was addressed to it. Fall
-            // back to text detection (any candidate language) for older firmware.
-            const wake = utterance?.wake?.fired === true || langs.some((l) => detectWake(text, l))
+            // The short on-device "yo" is a capture pre-filter, not permission
+            // to mutate a list. Authorization requires Whisper to hear the longer
+            // address phrase ("petito" / "yo petito", with documented aliases).
+            // This two-stage cascade keeps the instant yellow response and the
+            // natural pause after "yo" while rejecting model false accepts.
+            const deviceWake = utterance?.wake?.fired === true
+            const wake = langs.some((l) => detectWake(text, l))
             // Addressed = a wake word led the utterance, or it parses to a command
             // (covers STT mis-hearing the wake word but still getting the verb).
             // This drives the LED/parse milestones only; it does NOT decide whether
             // we write — see the write gate below.
-            const addressed = wake || intent.intent !== 'unknown'
+            const addressed = deviceWake || wake || intent.intent !== 'unknown'
             if (!addressed) {
                 log(`[voice] "${text}" -> ignored (no wake word / command)`)
                 reply?.done?.()
@@ -189,8 +189,11 @@ export function createVoiceFeedbackHandler ({
             // remove 0.85) must NOT execute or reach green/save. Until a real
             // wake-word model exists, this is the line that stops ambient speech
             // from silently mutating lists.
-            if (!shouldExecuteIntent(intent, { wake, floors })) {
-                log(`[voice] "${text}" -> ${intent.intent} (conf ${intent.confidence}) gated: not addressed (no wake word, confidence below floor)`)
+            if (!shouldExecuteIntent(intent, { wake, floors, requireWakePhrase })) {
+                const reason = requireWakePhrase && !wake
+                    ? 'required address phrase not heard'
+                    : 'confidence below floor'
+                log(`[voice] "${text}" -> ${intent.intent} (conf ${intent.confidence}) gated: ${reason}`)
                 // End on an explicit RED: a gated command used to just go dark
                 // after purple ("purple then nothing"), which reads as a hang.
                 // Red tells the user "understood but not saved — re-address me".

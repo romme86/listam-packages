@@ -12,7 +12,7 @@
 //     raw:    string,       // the normalized transcript actually parsed
 //   }
 
-import { grammarFor, WAKE_PHRASES } from './voice-grammar.mjs'
+import { ADDRESS_PHRASES, grammarFor, WAKE_PHRASES } from './voice-grammar.mjs'
 
 // Lowercase, fold diacritics (so "añade"/"anade" match), collapse whitespace,
 // drop surrounding punctuation. STT output is noisy on accents/casing.
@@ -54,7 +54,7 @@ function stripWakePrefix (text) {
 export function detectWake (transcript, locale = 'en') {
     const text = normalizeTranscript(transcript)
     if (!text) return false
-    return new RegExp(`^(?:${alternation(WAKE_PHRASES)})\\b`, 'i').test(text)
+    return new RegExp(`^(?:${alternation(ADDRESS_PHRASES)})\\b`, 'i').test(text)
 }
 
 function cleanSlot (s) {
