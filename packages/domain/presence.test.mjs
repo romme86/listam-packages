@@ -6,6 +6,7 @@ import {
     PRESENCE_HEARTBEAT_MS,
     PRESENCE_ONLINE_THRESHOLD_MS,
     isPresenceItem,
+    buildAttestedPresenceItem,
     buildPresenceItem,
     reducePresence,
     isOnlineNow,
@@ -51,6 +52,33 @@ test('a presence item survives the strict list-item validator (old-peer safe)', 
     assert.equal(normalized.cumulativeOnlineMs, 7)
     assert.equal(normalized.sessionCount, 2)
     assert.equal(normalized.listType, PRESENCE_LIST_TYPE)
+})
+
+test('owner attestation gives a legacy writer last-seen without discarding prior accounting', () => {
+    const prior = {
+        writerKey: 'legacy',
+        lastActiveAt: 100,
+        lastInteractionAt: 90,
+        sessionStartedAt: 50,
+        cumulativeOnlineMs: 400,
+        sessionCount: 2,
+        updatedAt: 100,
+        attestedBy: 'owner',
+    }
+    const it = buildAttestedPresenceItem({
+        writerKey: 'legacy',
+        observedAt: 300,
+        attestedBy: 'owner',
+        existing: prior,
+    })
+    assert.equal(it.lastActiveAt, 300)
+    assert.equal(it.lastInteractionAt, 300)
+    assert.equal(it.updatedAt, 300)
+    assert.equal(it.sessionStartedAt, 50)
+    assert.equal(it.cumulativeOnlineMs, 400)
+    assert.equal(it.sessionCount, 2)
+    assert.equal(it.attestedBy, 'owner')
+    assert.notEqual(normalizeListItem(it), null)
 })
 
 test('presence predicates: is a label-skip but not a peer-label or registry item', () => {

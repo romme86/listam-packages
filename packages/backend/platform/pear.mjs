@@ -2,7 +2,7 @@
 // module graph natively, but this factory takes every runtime binding as an
 // argument (Pear global, fs/path modules, RPC factory) so it can be
 // constructed — and contract-tested — outside a running Pear app too.
-export function createPearPlatform({ Pear, fs, join, fileURLToPath, createRpc, storageDir, storageNamespace = 'desktop', bootstrap, bootSecretPayload = '' }) {
+export function createPearPlatform({ Pear, fs, join, fileURLToPath, createRpc, storageDir, storageNamespace = 'desktop', bootstrap, bootSecretPayload = '', presenceWrites = true }) {
     if (!fs || !join) throw new Error('Pear platform requires fs and join bindings')
     if (typeof createRpc !== 'function') throw new Error('Pear platform requires a createRpc factory')
 
@@ -20,6 +20,7 @@ export function createPearPlatform({ Pear, fs, join, fileURLToPath, createRpc, s
         // owner-confirmed destructive reset, exactly like mobile.
         recoveryPolicy: 'interactive',
         storageNamespace,
+        presenceWrites,
         bootstrap,
         createRpc,
         onTeardown(handler) {

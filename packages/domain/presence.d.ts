@@ -27,6 +27,13 @@ export function buildPresenceItem (args: {
     attestedBy?: string | null
 }): Record<string, unknown>
 
+export function buildAttestedPresenceItem (args: {
+    writerKey: string
+    observedAt?: number
+    attestedBy: string
+    existing?: PresenceEntry | null
+}): Record<string, unknown>
+
 export function reducePresence (items: unknown[] | null | undefined): Map<string, PresenceEntry>
 export function isOnlineNow (entry: PresenceEntry | null | undefined, now: number, threshold?: number): boolean
 export function averageOnlineMs (entry: PresenceEntry | null | undefined): number

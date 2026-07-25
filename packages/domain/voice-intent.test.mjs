@@ -11,7 +11,8 @@ test('normalizeTranscript folds accents, case, punctuation and whitespace', () =
 test('detectWake: true only when a strong wake phrase leads the transcript', () => {
     assert.equal(detectWake('yo petito add milk'), true)
     assert.equal(detectWake('IO PETITO, aggiungi latte'), true)
-    assert.equal(detectWake('petito aggiungi latte'), true)
+    // Standalone petito is the Leaf's local music trigger, not command auth.
+    assert.equal(detectWake('petito aggiungi latte'), false)
     assert.equal(detectWake('yo add milk'), false)
     assert.equal(detectWake('hey listam take a note'), true)
     assert.equal(detectWake('dai dai dai dai add milk'), true)

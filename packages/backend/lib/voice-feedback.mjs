@@ -37,10 +37,10 @@ const DEFAULT_STT_TIMEOUT_MS = 18000
 // locales. Order is the tie-break preference when multiple would match.
 const AUTO_LANGS = ['en', 'it', 'es', 'de', 'fr', 'pt']
 
-// Write gate (NOT the LED): which parsed commands may execute and save. The
-// on-device microWakeWord model recognizes a deliberately short "yo", useful as
-// a low-latency capture trigger but too weak to authorize mutations. By default
-// the host therefore requires "petito" or the longer phrase "yo petito".
+// Write gate (NOT the LED): which parsed commands may execute and save.
+// Standalone "petito" is handled locally as music and is never command
+// authorization. By default the host requires the compound "yo petito" phrase
+// (or another explicit legacy address phrase) before mutating a list.
 // Per-intent floors remain available for explicit legacy wake-optional mode:
 //   • add_item / note (non-destructive): 0.75 — the anchored "add milk" (0.75)
 //     still works hands-free, but the 0.6 lenient-retry path is excluded.
@@ -145,9 +145,9 @@ export function createVoiceFeedbackHandler ({
                     lang = candidate
                 }
             }
-            // The short on-device "yo" is a capture pre-filter, not permission
-            // to mutate a list. Authorization requires Whisper to hear the longer
-            // address phrase ("petito" / "yo petito", with documented aliases).
+            // The on-device compound model opens command capture, but host-side
+            // authorization still requires Whisper to hear "yo petito" (or a
+            // documented explicit alias). Bare "petito" is local music only.
             // This two-stage cascade keeps the instant yellow response and the
             // natural pause after "yo" while rejecting model false accepts.
             const deviceWake = utterance?.wake?.fired === true

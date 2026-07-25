@@ -65,3 +65,8 @@ export function computePlanReorder (
     fromIndex: number,
     toIndex: number,
 ): { updates: PlanReorderUpdate[]; renormalized: boolean }
+export function computePlanInsert (
+    orderedRecords: PlanRecord[],
+    movingRecord: PlanRecord,
+    toIndex: number,
+): { updates: PlanReorderUpdate[]; renormalized: boolean }

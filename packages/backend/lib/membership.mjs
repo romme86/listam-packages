@@ -6,6 +6,12 @@ export const MEMBERSHIP_RECORD_VERSION = 1
 export const OWNER_BOOTSTRAP_ACTION = 'bootstrap-owner'
 export const ADD_WRITER_ACTION = 'add-writer'
 export const REMOVE_WRITER_ACTION = 'remove-writer'
+// Owner-signed, same-epoch key redistribution. This is intentionally a
+// membership record (and therefore plaintext inside the Autobase encryption),
+// not a list operation encrypted by the very epoch key a stale peer is missing.
+// It lets an authorized peer recover during resync without re-adding removed
+// writers or exposing the key to the frontend.
+export const RESYNC_EPOCH_ACTION = 'resync-epoch'
 export const OWNER_AUTHORITY_SECRET_BYTES = 64
 export const OWNER_AUTHORITY_PUBLIC_BYTES = 32
 export const WRITER_KEY_BYTES = 32
@@ -180,6 +186,29 @@ export function createRemoveWriterMembershipRecord({
     })
 }
 
+export function createEpochResyncMembershipRecord({
+    ownerAuthorityKeyPair,
+    writerKey,
+    baseKey,
+    sequence,
+    epoch,
+    epochKey,
+    epochGrants,
+    createdAt = Date.now(),
+}) {
+    return createSignedMembershipRecord({
+        action: RESYNC_EPOCH_ACTION,
+        ownerAuthorityKeyPair,
+        writerKey,
+        baseKey,
+        sequence,
+        epoch,
+        epochKey,
+        epochGrants,
+        createdAt,
+    })
+}
+
 export function createSignedMembershipRecord({
     action,
     ownerAuthorityKeyPair,
@@ -316,6 +345,40 @@ export function reduceMembershipOperation(record, state = createMembershipState(
         })
     }
 
+    if (body.action === RESYNC_EPOCH_ACTION) {
+        if (!current.ownerAuthorityKey) return rejected('missing-owner', current)
+        if (body.ownerAuthorityKey !== current.ownerAuthorityKey) return rejected('wrong-owner', current)
+        if (body.sequence <= current.highestSequence) return rejected('replay', current)
+        if (body.writerKey !== current.ownerWriterKey) return rejected('not-owner-writer', current)
+        if (body.epoch !== current.currentEpoch) return rejected('wrong-epoch', current)
+        if (!body.epochKeyHash) return rejected('missing-epoch-key-hash', current)
+
+        // Every active writer must receive exactly one grant, and no removed or
+        // unknown writer may be smuggled into the record. Bind each grant to the
+        // epoch public key that writer registered in the signed membership log.
+        const grantWriterKeys = new Set(body.epochGrants.map((grant) => grant.writerKey))
+        if (grantWriterKeys.size !== current.writers.size) return rejected('incomplete-epoch-grants', current)
+        for (const writerKey of current.writers) {
+            if (!grantWriterKeys.has(writerKey)) return rejected('missing-epoch-grant', current)
+            const grant = body.epochGrants.find((entry) => entry.writerKey === writerKey)
+            if (!grant || current.writerEpochPublicKeys.get(writerKey) !== grant.epochPublicKey) {
+                return rejected('wrong-epoch-public-key', current)
+            }
+        }
+
+        const next = cloneMembershipState(current)
+        next.highestSequence = body.sequence
+        // An owner may use resync to repair a locally restored epoch key. The
+        // signed record makes that key hash authoritative for this epoch; the
+        // following encrypted snapshot re-establishes a complete view.
+        next.currentEpochKeyHash = body.epochKeyHash
+        return accepted(next, {
+            epochGrants: body.epochGrants,
+            epochKeyHash: body.epochKeyHash,
+            epochResynced: true,
+        })
+    }
+
     return rejected('unknown-action', current)
 }
 
@@ -358,7 +421,8 @@ function normalizeMembershipBody(raw) {
     if (
         action !== OWNER_BOOTSTRAP_ACTION &&
         action !== ADD_WRITER_ACTION &&
-        action !== REMOVE_WRITER_ACTION
+        action !== REMOVE_WRITER_ACTION &&
+        action !== RESYNC_EPOCH_ACTION
     ) return null
 
     const baseKey = normalizeHex(raw?.baseKey, WRITER_KEY_BYTES)
@@ -390,6 +454,12 @@ function normalizeMembershipBody(raw) {
 
     if (action === REMOVE_WRITER_ACTION) {
         if (!previousEpoch || !epoch || !epochKeyHash) return null
+        if (!epochGrants || epochGrants.length === 0) return null
+    }
+
+    if (action === RESYNC_EPOCH_ACTION) {
+        if (raw?.previousEpoch != null || raw?.epochPublicKey != null) return null
+        if (!epoch || !epochKeyHash) return null
         if (!epochGrants || epochGrants.length === 0) return null
     }
 

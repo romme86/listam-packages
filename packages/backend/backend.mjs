@@ -34,14 +34,14 @@ import {
 } from '@listam/protocol'
 import b4a from 'b4a'
 import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain, setMutationHook} from './lib/item.mjs'
-import { stopPresenceHeartbeat, writeHeartbeat, notePresenceInteraction, pokePresence } from './lib/presence-heartbeat.mjs'
+import { stopPresenceHeartbeat, writeHeartbeat, notePresenceInteraction, noteObservedWriterActivity, pokePresence, setPresenceWritesEnabled } from './lib/presence-heartbeat.mjs'
 import {
     applyOperationToList,
     createListViewEntry,
     normalizeListOperation,
 } from './lib/list-reducer.mjs'
 import {loadAutobaseKey, saveAutobaseKey, loadEncryptionKey, saveEncryptionKey, loadOwnerAuthorityKey, saveOwnerAuthorityKey, deleteLegacyKeyFile, deleteLegacyInviteFile, loadEpochKey, saveEpochKey, deleteEpochKey, loadEpochEncryptionKey, saveEpochEncryptionKey} from "./lib/key.mjs"
-import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery} from "./lib/network.mjs"
+import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, resyncAuthorizedEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery} from "./lib/network.mjs"
 import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
@@ -53,11 +53,13 @@ import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, 
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
+import { buildSyncListPayload } from './lib/sync-list-payload.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
 import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView, persistSharedSecrets, autoOpenSharedBase, authorizeWriterOnSharedBase } from './lib/shared-base.mjs'
 import { reduceRegistry, isRegistryItem, REG_KIND_LIST, buildListMetaItem } from './lib/list-registry.mjs'
 import { planOrphanedListHeals, tombstonedFromLog } from './lib/orphan-heal.mjs'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE } from '@listam/domain/identity'
+import { isPresenceItem } from '@listam/domain/presence'
 import { isInternalChannelItem, buildSharedCredItem, reduceSharedCreds, buildSharedJoinReqItem, reduceSharedJoinReqs } from './lib/shared-creds.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, epochPublicKeyHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
@@ -196,6 +198,7 @@ export async function startBackend(platform) {
         : null
     platformFs = platform.fs
     setBackendFs(platformFs)
+    setPresenceWritesEnabled(platform.presenceWrites !== false)
 
     // Single-writer lease over this storage root. Unlike the previous 'wx'
     // lock file, a lease left behind by a crash expires and is recovered
@@ -460,6 +463,11 @@ async function handleFrontendRequest(req, error) {
             }
             case RPC_REQUEST_SYNC: {
                 logger.log('[INFO] Command RPC_REQUEST_SYNC - frontend requesting current list')
+                // Renderer recovery is deliberately read-only. Epoch repair is
+                // driven by peer connection events in network.mjs; starting a
+                // repair batch here can wedge the shared write chain when no
+                // writer can flush, making every later UI edit wait forever and
+                // repeating the same lock on each restart.
                 // Reconcile the materialized view first. `currentList` is only an
                 // in-memory projection and can lag after a suspended mobile
                 // worklet or a dropped renderer event; recovery must answer from
@@ -1536,7 +1544,8 @@ export async function apply (ctx, nodes, view, host) {
         ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
     }))
 
-    for (const { value } of nodes) {
+    for (const node of nodes) {
+        const { value } = node
         if (!value) continue
 
         if (isMembershipRecord(value)) {
@@ -1645,8 +1654,19 @@ export async function apply (ctx, nodes, view, host) {
         // requests) ride the personal base but are NEVER shown in the UI — they
         // only drive a reconcile (auto-open a sibling's shared base, or authorize
         // a requester). `internalItem` suppresses the frontend push below.
-        const internalItem = isInternalChannelItem(operation.value)
+        const internalItem = operation.type === 'list'
+            ? isInternalChannelItem({ listType: operation.listType })
+            : isInternalChannelItem(operation.value)
         if (isPersonalContext(ctx) && internalItem) scheduleReconcileSharedBases()
+
+        // Older rolling-upgrade clients do not publish the presence channel.
+        // A valid operation is still direct evidence that its source writer was
+        // active. Let the owner publish a coalesced, observer-attested last-seen
+        // record after apply completes; the operation timestamp prevents replayed
+        // history from making an offline device look newly online.
+        if (isPersonalContext(ctx) && !isPresenceOperation(operation)) {
+            noteObservedWriterActivity(nodeWriterKeyHex(node), operationObservedAt(operation))
+        }
 
         if (operation.type === 'add') {
             if (!validateItem(operation.value)) {
@@ -1705,10 +1725,13 @@ export async function apply (ctx, nodes, view, host) {
             await view.append(createListViewEntry(operation))
             const nextList = applyOperationToList(ctx.currentList, operation)
             ctx.setCurrentList(nextList)
-            if (rpc) {
-                const listPayload = ctx.role === 'shared' && ctx.baseKey
-                    ? { list: nextList, baseKey: b4a.toString(ctx.baseKey, 'hex') }
-                    : nextList
+            if (rpc && !internalItem) {
+                const listPayload = buildSyncListPayload({
+                    role: ctx.role,
+                    baseKeyHex: ctx.baseKey ? b4a.toString(ctx.baseKey, 'hex') : null,
+                    operation,
+                    currentList: nextList,
+                })
                 rpc.request(SYNC_LIST).send(JSON.stringify(listPayload))
             }
             continue
@@ -1717,6 +1740,30 @@ export async function apply (ctx, nodes, view, host) {
         // All other values are appended to the view (for future use)
         await view.append(operation)
     }
+}
+
+function nodeWriterKeyHex(node) {
+    try {
+        const key = node?.writer?.core?.key ?? node?.writer?.key
+        return key ? b4a.toString(key, 'hex') : null
+    } catch {
+        return null
+    }
+}
+
+function isPresenceOperation(operation) {
+    if (operation?.type === 'list') return isPresenceItem({ listType: operation.listType })
+    return isPresenceItem(operation?.value)
+}
+
+function operationObservedAt(operation) {
+    const items = operation?.type === 'list' ? operation.value : [operation?.value]
+    let newest = 0
+    for (const item of (Array.isArray(items) ? items : [])) {
+        const at = Number(item?.updatedAt)
+        if (Number.isFinite(at) && at > newest) newest = at
+    }
+    return newest
 }
 
 async function adoptGrantedEpochKey(ctx, result) {

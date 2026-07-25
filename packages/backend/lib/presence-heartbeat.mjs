@@ -14,21 +14,41 @@
 // lastInteractionAt in memory for the next beat), and the cadence is one tunable
 // constant in the domain module.
 
-import { autobase, swarm } from './state.mjs'
+import { autobase, swarm, membershipState, ownerAuthorityKeyPair } from './state.mjs'
 import { updateItem, rebuildExtraListItems } from './item.mjs'
-import { buildPresenceItem, reducePresence, PRESENCE_HEARTBEAT_MS } from '@listam/domain/presence'
+import {
+    buildAttestedPresenceItem,
+    buildPresenceItem,
+    reducePresence,
+    PRESENCE_HEARTBEAT_MS,
+} from '@listam/domain/presence'
+import { canCreateMembershipInvite } from './membership.mjs'
 import { logger } from './logger.mjs'
 
 let _timer = null
 let _started = false
+let _writesEnabled = true
 let _lastAccrualAt = 0
 let _cumulativeOnlineMs = 0
 let _sessionCount = 0
 let _sessionStartedAt = 0
 let _lastInteractionAt = 0
 let _lastWriteAt = 0
+let _observedTimer = null
+const _pendingObservedAt = new Map()
+const _lastObservedWriteAt = new Map()
+
+// Observer writes happen only for legacy peers without self-heartbeats. Coalesce
+// bursts so replay/apply batches cannot turn one user action into write noise.
+const OBSERVED_ACTIVITY_DEBOUNCE_MS = 100
+const OBSERVED_ACTIVITY_MIN_WRITE_MS = 30_000
 
 function nowMs () { return Date.now() }
+
+export function setPresenceWritesEnabled (enabled = true) {
+    _writesEnabled = enabled !== false
+    if (!_writesEnabled) stopPresenceHeartbeat()
+}
 
 function localWriterKeyHex () {
     try { return autobase?.local?.key ? autobase.local.key.toString('hex') : null } catch { return null }
@@ -50,6 +70,30 @@ export function notePresenceInteraction () {
     _lastInteractionAt = nowMs()
 }
 
+// Record a real operation authored by ANOTHER active writer. The operation's
+// own updatedAt is used as the observation time (capped at the owner's clock),
+// so an old historical replay cannot make a long-offline device look newly
+// online. Only the owner may attest and only for current members.
+export function noteObservedWriterActivity (writerKey, observedAt = 0) {
+    if (!_writesEnabled) return false
+    const key = typeof writerKey === 'string' ? writerKey.trim().toLowerCase() : ''
+    if (!key || key === localWriterKeyHex()) return false
+    if (!membershipState?.writers?.has?.(key)) return false
+    if (!canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair)) return false
+
+    const rawObservedAt = Number(observedAt)
+    const at = Number.isFinite(rawObservedAt) && rawObservedAt > 0
+        ? Math.min(rawObservedAt, nowMs())
+        : nowMs()
+    const previous = _pendingObservedAt.get(key) || 0
+    if (at > previous) _pendingObservedAt.set(key, at)
+    if (!_observedTimer) {
+        _observedTimer = setTimeout(flushObservedWriterActivity, OBSERVED_ACTIVITY_DEBOUNCE_MS)
+        _observedTimer?.unref?.()
+    }
+    return true
+}
+
 // Stop the timer and zero the accounting. Called on a base switch/teardown so the
 // next base starts a fresh session and re-seeds from its OWN last presence item
 // (never carries the previous base's accrual).
@@ -62,6 +106,7 @@ export function resetPresenceAccounting () {
     _sessionStartedAt = 0
     _lastInteractionAt = 0
     _lastWriteAt = 0
+    _lastObservedWriteAt.clear()
 }
 
 // Idempotent. Seeds cumulative/session totals from this device's own last persisted
@@ -90,6 +135,11 @@ export async function startPresenceHeartbeat () {
     }
     _sessionCount += 1
 
+    // Desktop presence is telemetry, never a prerequisite for editing. The
+    // desktop host disables these writes because an Autobase append can remain
+    // pending during boot-time replication and occupy the user write queue.
+    if (!_writesEnabled) return
+
     _timer = setInterval(() => { tick() }, PRESENCE_HEARTBEAT_MS)
     _timer?.unref?.()
 
@@ -98,12 +148,14 @@ export async function startPresenceHeartbeat () {
 
 export function stopPresenceHeartbeat () {
     if (_timer) { clearInterval(_timer); _timer = null }
+    if (_observedTimer) { clearTimeout(_observedTimer); _observedTimer = null }
+    _pendingObservedAt.clear()
 }
 
 // Prompt an immediate beat (e.g. right after the base became writable) so a peer
 // appears online without waiting a full cadence. No-op before start.
 export function pokePresence () {
-    if (!_started) return
+    if (!_started || !_writesEnabled) return
     tick()
 }
 
@@ -122,6 +174,7 @@ function accrue (now) {
 }
 
 export async function writeHeartbeat ({ final = false } = {}) {
+    if (!_writesEnabled) return false
     const key = localWriterKeyHex()
     // Can't write unless we have a local key and the base is writable. Keep the
     // accrual clock current so the next writable+online beat doesn't back-count the
@@ -151,4 +204,42 @@ export async function writeHeartbeat ({ final = false } = {}) {
     const ok = await updateItem(item, null)
     if (ok) _lastWriteAt = now
     return ok
+}
+
+async function flushObservedWriterActivity () {
+    _observedTimer = null
+    const pending = [..._pendingObservedAt.entries()]
+    _pendingObservedAt.clear()
+    if (pending.length === 0) return
+
+    try {
+        if (!canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair)) return
+        const ownerKey = localWriterKeyHex()
+        if (!ownerKey) return
+        const presence = reducePresence(await rebuildExtraListItems())
+
+        for (const [writerKey, observedAt] of pending) {
+            if (!membershipState?.writers?.has?.(writerKey) || writerKey === ownerKey) continue
+            const existing = presence.get(writerKey) || null
+            // A null attestedBy means this writer supports and publishes its own
+            // richer heartbeat. Never overwrite it with observer data.
+            if (existing && !existing.attestedBy) continue
+            if ((Number(existing?.lastActiveAt) || 0) >= observedAt) continue
+            const lastWrite = _lastObservedWriteAt.get(writerKey) || 0
+            if (lastWrite > 0 && (observedAt - lastWrite) < OBSERVED_ACTIVITY_MIN_WRITE_MS) continue
+
+            const item = buildAttestedPresenceItem({
+                writerKey,
+                observedAt,
+                attestedBy: ownerKey,
+                existing,
+            })
+            if (await updateItem(item, null)) {
+                _lastObservedWriteAt.set(writerKey, observedAt)
+                presence.set(writerKey, reducePresence([item]).get(writerKey))
+            }
+        }
+    } catch (e) {
+        logger.log('[WARNING] presence: owner activity attestation failed:', e?.message ?? e)
+    }
 }

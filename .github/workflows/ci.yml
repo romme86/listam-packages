@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  ci:
+    name: lint + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # npm workspaces: this links every @listam/* package to its sibling in
+      # packages/, which is what the test suite imports.
+      - name: Install workspace
+        run: npm install --no-audit --no-fund
+
+      # Single entry point: CI runs exactly what a developer runs locally.
+      # Never reimplement the gate list here — change package.json instead.
+      - name: Gates
+        run: npm run ci

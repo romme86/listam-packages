@@ -9,6 +9,9 @@ import { INVITE_MAX_USES, isInviteUsable, reserveInviteUse, withInvitePolicy } f
 import { createJoinRollbackSnapshot, restoreJoinRollbackSnapshot } from "./join-rollback.mjs"
 import { createAutoBackup } from "./auto-backup.mjs"
 import { performMemberRemovalRekey } from "./rekey.mjs"
+import { epochResyncRecordMatchesMembership, performEpochResync } from './epoch-resync.mjs'
+import { createEpochGrantChannel } from './epoch-grant-channel.mjs'
+import { validateDirectEpochGrant } from './epoch-direct-adoption.mjs'
 import {
     buildMembershipRoster,
     canCreateMembershipInvite,
@@ -27,6 +30,7 @@ import {
     encodeInviteEpochData,
     epochPublicKeyHex,
     generateEpochKey,
+    reconcileLegacyEpochEncryptionKeyPair,
 } from './key-epochs.mjs'
 import { RPC_MESSAGE, RPC_GET_KEY, SYNC_LIST } from "@listam/protocol"
 import Corestore from "corestore"
@@ -71,7 +75,7 @@ import {
     isPendingJoinSuccess,
     setIsPendingJoinSuccess
 } from "./state.mjs"
-import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, rebuildExtraListItems, projectItemsToFrontend, readPersistedMembershipRecords, resetViewCheckpoint, syncListToFrontend } from "./item.mjs"
+import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, readPersistedMembershipRecords, resetViewCheckpoint, syncListToFrontend, waitForFlushableWriter } from "./item.mjs"
 import { startPresenceHeartbeat, pokePresence, resetPresenceAccounting } from "./presence-heartbeat.mjs"
 import { logger } from "./logger.mjs"
 import { getBackendFs } from './platform-fs.mjs'
@@ -81,6 +85,15 @@ let _initPromise = null
 let _writableCheckTimer = null
 let inviteUsesRemaining = 0
 let _joinedBase = false
+// RPC_REQUEST_SYNC is also fired periodically by desktop. Re-grant once per
+// owner backend/base membership+epoch generation; concurrent requests share the
+// same promise. Reconnecting peers receive the cached signed grant directly over
+// Noise, without appending another membership record or repair batch. A changed
+// writer roster or epoch invalidates the cache and causes exactly one new batch.
+let _epochResyncDone = false
+let _epochResyncPromise = null
+let _epochResyncRecord = null
+const _epochGrantChannels = new Set()
 
 // Network-status reporting (the header readiness dot). Each initAutobase pass
 // builds a fresh swarm; _netStatusGen guards listeners so a torn-down base's
@@ -400,6 +413,8 @@ async function tearDownAutobaseSwarmStore() {
         _writableCheckTimer = null
     }
     setIsPendingJoinSuccess(false)
+    for (const channel of _epochGrantChannels) channel.close()
+    _epochGrantChannels.clear()
 
     // 1. Clean up BlindPairing
     if (pairing) {
@@ -539,6 +554,9 @@ export async function initAutobase(newBaseKey, options = {}) {
 
         await tearDownAutobaseSwarmStore()
         _joinedBase = false
+        _epochResyncDone = false
+        _epochResyncPromise = null
+        _epochResyncRecord = null
         setMembershipState(createMembershipState())
         setCurrentInvite(null)
         inviteUsesRemaining = 0
@@ -668,10 +686,32 @@ export async function initAutobase(newBaseKey, options = {}) {
         // membership and list state land, and the frontend gets synced late).
         const bootViewTail = (async () => {
             const persistedMembership = await readPersistedMembershipRecords()
+            const replayedMembership = reduceMembershipLog(persistedMembership, { baseKey: autobase.key })
+            const localWriterKey = autobase.local?.key?.toString('hex') || null
+            const expectedEpochPublicKey = localWriterKey
+                ? replayedMembership.writerEpochPublicKeys.get(localWriterKey)
+                : null
+            let activeEpochEncryptionKeyPair = epochEncryptionKeyPair
+            if (activeEpochEncryptionKeyPair && expectedEpochPublicKey) {
+                const identity = reconcileLegacyEpochEncryptionKeyPair(
+                    activeEpochEncryptionKeyPair,
+                    expectedEpochPublicKey,
+                )
+                if (identity.migrated) {
+                    activeEpochEncryptionKeyPair = identity.keyPair
+                    setEpochEncryptionKeyPair(identity.keyPair)
+                    await saveEpochEncryptionKey(identity.keyPair.secretKey)
+                    logger.log('[AUDIT] Migrated legacy epoch encryption identity to membership-authorized key')
+                } else if (!identity.matched) {
+                    logger.log('[WARNING] Local epoch encryption identity does not match owner-signed membership', {
+                        reason: identity.reason,
+                    })
+                }
+            }
             const epochRecovery = recoverEpochKeyFromMembership(persistedMembership, {
                 baseKey: autobase.key,
-                localWriterKey: autobase.local?.key?.toString('hex'),
-                epochEncryptionKeyPair,
+                localWriterKey,
+                epochEncryptionKeyPair: activeEpochEncryptionKeyPair,
                 currentEpochKey: epochKey,
             })
             setMembershipState(epochRecovery.state)
@@ -753,6 +793,13 @@ export async function initAutobase(newBaseKey, options = {}) {
         })
         swarm.on('connection', (conn) => {
             logger.log('[INFO] New peer connected (replication swarm)', b4a.from(conn.publicKey).toString('hex'))
+            let grantChannel = null
+            grantChannel = createEpochGrantChannel(conn, {
+                onGrant: acceptDirectEpochGrant,
+                logger,
+                onClose: () => _epochGrantChannels.delete(grantChannel),
+            })
+            if (grantChannel) _epochGrantChannels.add(grantChannel)
             conn.on('error', (err) => {
                 logger.log('[ERROR] Replication connection error:', err)
             })
@@ -760,12 +807,42 @@ export async function initAutobase(newBaseKey, options = {}) {
             broadcastPeerCount()
             broadcastNetworkStatus()
             conn.on('close', () => {
+                if (grantChannel) {
+                    _epochGrantChannels.delete(grantChannel)
+                    grantChannel.close()
+                }
                 setPeerCount(swarm.connections.size)
                 broadcastPeerCount()
                 broadcastNetworkStatus()
             })
             if (autobase) {
-                autobase.replicate(conn)
+                const connectedBase = autobase
+                const startReplication = () => {
+                    if (!conn.destroyed && !connectedBase.closing) connectedBase.replicate(conn)
+                }
+                if (epochResyncRecordMatchesMembership(_epochResyncRecord, membershipState)) {
+                    // A peer may have upgraded since its previous connection and
+                    // can now accept the same owner-signed record it previously
+                    // rejected. Direct delivery is sufficient; do not append a
+                    // fresh record and another full repair batch on every socket.
+                    // Deliver BEFORE starting Autobase replication so a stale
+                    // peer has the key before it sees already-appended repairs.
+                    publishEpochGrantToChannel(grantChannel, _epochResyncRecord).catch((err) => {
+                        logger.log('[ERROR] Connected-peer direct epoch grant failed:', err)
+                    }).finally(startReplication)
+                } else {
+                    // A connection is a replication signal, not permission to
+                    // mutate durable state. The resync cache is intentionally
+                    // process-local, so launching a full grant + repair batch
+                    // here repeated it after every restart. If that append
+                    // stalled, it occupied the shared write chain before the
+                    // first user edit and reproduced the permanent read-only
+                    // UI on every launch. Replicate now; epoch rotation and
+                    // explicit recovery flows own durable repair writes.
+                    startReplication()
+                    _epochResyncDone = false
+                    _epochResyncRecord = null
+                }
             } else {
                 logger.log('[WARNING] No Autobase yet to replicate with')
             }
@@ -1124,6 +1201,8 @@ export async function removeMemberAndRotateEpoch(writerKey) {
         logger,
     })
     if (result.committed) {
+        _epochResyncDone = false
+        _epochResyncRecord = null
         broadcastMembershipRoster()
         // The epoch rotated: any outstanding invite embeds the retired epoch
         // key in its signed additional data, so mint a fresh one.
@@ -1133,6 +1212,86 @@ export async function removeMemberAndRotateEpoch(writerKey) {
         ? { type: 'member-removed', writerKey: normalizeHex(writerKey, 32), snapshot: result.snapshot !== false }
         : { type: 'member-removal-failed', reason: result.reason })
     return result.ok
+}
+
+export async function resyncAuthorizedEpoch() {
+    if (_epochResyncDone && epochResyncRecordMatchesMembership(_epochResyncRecord, membershipState)) {
+        return { ok: true, skipped: true, reason: 'already-resynced' }
+    }
+    if (_epochResyncDone) {
+        _epochResyncDone = false
+        _epochResyncRecord = null
+    }
+    if (_epochResyncPromise) return _epochResyncPromise
+
+    _epochResyncPromise = performEpochResync({
+        autobase,
+        epochKey,
+        membershipState,
+        ownerAuthorityKeyPair,
+        getAllItems: rebuildAllItems,
+        prepareListAppendOperation,
+        enqueueWrite,
+        waitForFlushableWriter,
+        logger,
+        publishGrant: publishEpochGrantToConnectedPeers,
+    }).then((result) => {
+        if (result.ok) {
+            _epochResyncDone = true
+            _epochResyncRecord = result.grantRecord || null
+        }
+        else if (!result.skipped) logger.log('[ERROR] Epoch resync did not complete', { reason: result.reason })
+        else logger.log('[INFO] Epoch resync skipped', { reason: result.reason })
+        return result
+    }).finally(() => {
+        _epochResyncPromise = null
+    })
+    return _epochResyncPromise
+}
+
+async function publishEpochGrantToChannel(channel, record) {
+    if (!channel || !record) return false
+    const acknowledged = await channel.sendGrant(record)
+    logger.log('[AUDIT] Reused cached direct epoch grant for connected peer', { acknowledged })
+    return acknowledged
+}
+
+async function publishEpochGrantToConnectedPeers(record) {
+    const channels = [..._epochGrantChannels]
+    if (channels.length === 0) return { attempted: 0, acknowledged: 0 }
+
+    const acknowledgements = await Promise.all(channels.map((channel) => channel.sendGrant(record)))
+    const acknowledged = acknowledgements.filter(Boolean).length
+    logger.log('[AUDIT] Published direct epoch grant to connected peers', {
+        attempted: channels.length,
+        acknowledged,
+    })
+    return { attempted: channels.length, acknowledged }
+}
+
+async function acceptDirectEpochGrant(record) {
+    if (!autobase?.key || !autobase?.local?.key || !epochEncryptionKeyPair) return false
+
+    const adoption = validateDirectEpochGrant(record, {
+        membershipState,
+        baseKey: autobase.key,
+        localWriterKey: autobase.local.key,
+        epochEncryptionKeyPair,
+        currentEpochKey: epochKey,
+    })
+    if (!adoption.ok) {
+        logger.log('[WARNING] Rejected direct epoch grant', { reason: adoption.reason })
+        return false
+    }
+    if (adoption.alreadyAdopted) return true
+
+    setMembershipState(adoption.state)
+    setEpochKey(adoption.epochKey)
+    await saveEpochKey(adoption.epochKey)
+    logger.log('[AUDIT] Adopted direct owner-signed epoch grant', {
+        epoch: adoption.state.currentEpoch,
+    })
+    return true
 }
 
 // Build the membership roster for the frontend: who the writers are, which one

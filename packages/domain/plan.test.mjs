@@ -18,6 +18,7 @@ import {
     reducePlan,
     groupPlanByDate,
     computePlanReorder,
+    computePlanInsert,
 } from './plan.mjs'
 import { normalizeListItem } from './list-reducer.mjs'
 import { isRegistryItem } from './list-registry.mjs'
@@ -120,6 +121,37 @@ test('computePlanReorder moves a record and returns planOrder writes', () => {
     assert.ok(updates.length >= 1)
     assert.equal(updates[0].ref, 'i:d::c')
     assert.ok(updates[0].planOrder < 1000)
+})
+
+test('computePlanInsert places a cross-day record at an exact destination position', () => {
+    const target = groupPlanByDate(reducePlan([
+        buildItemPlanEntry({ listId: 'd', itemId: 'a', plannedFor: '2026-06-22', planOrder: 1000, updatedAt: 1 }),
+        buildItemPlanEntry({ listId: 'd', itemId: 'b', plannedFor: '2026-06-22', planOrder: 2000, updatedAt: 1 }),
+    ])).get('2026-06-22')
+    const moving = reducePlan([
+        buildItemPlanEntry({ listId: 'd', itemId: 'old', plannedFor: '2026-06-20', planOrder: 1000, updatedAt: 1 }),
+    ]).get('i:d::old')
+
+    const { updates, renormalized } = computePlanInsert(target, moving, 1)
+    assert.equal(renormalized, false)
+    assert.deepEqual(updates, [{ ref: 'i:d::old', planOrder: 1500 }])
+})
+
+test('computePlanInsert supports appending to populated and empty days', () => {
+    const moving = reducePlan([
+        buildItemPlanEntry({ listId: 'd', itemId: 'old', plannedFor: '2026-06-20', planOrder: 5, updatedAt: 1 }),
+    ]).get('i:d::old')
+    const target = groupPlanByDate(reducePlan([
+        buildItemPlanEntry({ listId: 'd', itemId: 'a', plannedFor: '2026-06-22', planOrder: 1000, updatedAt: 1 }),
+        buildItemPlanEntry({ listId: 'd', itemId: 'b', plannedFor: '2026-06-22', planOrder: 2000, updatedAt: 1 }),
+    ])).get('2026-06-22')
+
+    assert.deepEqual(computePlanInsert(target, moving, 2).updates, [
+        { ref: 'i:d::old', planOrder: 3000 },
+    ])
+    assert.deepEqual(computePlanInsert([], moving, 0).updates, [
+        { ref: 'i:d::old', planOrder: 1000 },
+    ])
 })
 
 test('toDateKey / shiftDateKey are pure and consistent', () => {

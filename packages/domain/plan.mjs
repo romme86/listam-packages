@@ -26,7 +26,7 @@
 // Two devices flagging different items never conflict; the same ref resolves LWW
 // by updatedAt.
 
-import { sortByOrder, computeReorder } from './ordering.mjs'
+import { sortByOrder, computeReorder, orderBetween } from './ordering.mjs'
 
 export const PLAN_LIST_ID = '__plan__'
 export const PLAN_LIST_TYPE = 'plan'
@@ -221,4 +221,32 @@ export function computePlanReorder (orderedRecords, fromIndex, toIndex) {
         updates: updates.map((u) => ({ ref: u.ref, planOrder: u.order })),
         renormalized,
     }
+}
+
+// Compute planOrder writes for inserting a record from another day at a precise
+// position in an ordered day. Unlike computePlanReorder, the destination may be
+// one past the final target index (append). The caller is responsible for also
+// changing the moving record's plannedFor; any additional updates are a rare
+// renormalization of the destination day's existing records.
+export function computePlanInsert (orderedRecords, movingRecord, toIndex) {
+    if (!movingRecord || typeof movingRecord.ref !== 'string' || !movingRecord.ref) {
+        return { updates: [], renormalized: false }
+    }
+    const targets = (Array.isArray(orderedRecords) ? orderedRecords : [])
+        .filter((rec) => rec && rec.ref !== movingRecord.ref)
+    const dest = Math.max(0, Math.min(targets.length, Number.isFinite(toIndex) ? Math.trunc(toIndex) : targets.length))
+
+    // Appending has no in-array destination for computeReorder. Give the moving
+    // record an order after the final target (or the standard first order when
+    // the destination day is empty).
+    if (dest === targets.length) {
+        const before = targets.length > 0 ? numberOr(targets[targets.length - 1].planOrder, 0) : null
+        return {
+            updates: [{ ref: movingRecord.ref, planOrder: orderBetween(before, null) }],
+            renormalized: false,
+        }
+    }
+
+    const seq = [...targets, movingRecord]
+    return computePlanReorder(seq, seq.length - 1, dest)
 }

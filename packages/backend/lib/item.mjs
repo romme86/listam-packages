@@ -5,7 +5,7 @@ import {generateId} from "./util.mjs";
 import {autobase, store, rpc, currentList, epochKey, membershipState, boardConfigState} from './state.mjs'
 import {SYNC_LIST, RPC_ADD_FROM_BACKEND} from "@listam/protocol";
 import { logger } from "./logger.mjs"
-import { createEncryptedListOperation } from './key-epochs.mjs'
+import { createEncryptedListOperation, epochKeyHashHex } from './key-epochs.mjs'
 import {
     DEFAULT_LIST_ID,
     DEFAULT_LIST_TYPE,
@@ -66,6 +66,7 @@ function ctxView (ctx) {
 // must be refused instead of started.
 const FLUSHABLE_WAIT_MS = 4000
 const FLUSHABLE_POLL_MS = 200
+const FLUSHABLE_UPDATE_WAIT_MS = 500
 
 export async function waitForFlushableWriter (view) {
     const v = view || ctxView(null)
@@ -75,6 +76,10 @@ export async function waitForFlushableWriter (view) {
         if (!ab || ab.closing) return false
         try {
             const writer = ab.localWriter
+            // Test doubles and a future Autobase API may not expose the
+            // internal localWriter handle. Preserve the documented fail-open
+            // behavior instead of polling a missing handle until timeout.
+            if (!writer) return true
             if (writer && !writer.closed && writer.idle()) return true
         } catch {
             // localWriter.idle() is internal autobase API; if it changes shape,
@@ -86,10 +91,27 @@ export async function waitForFlushableWriter (view) {
         // update() runs one linearizer advance cycle, which is what ingests
         // the local core after a writer-set reorg. With a reachable peer one
         // or two cycles settle it; without one it stays stalled and we refuse.
-        try {
-            await ab.update()
-        } catch (e) {
-            logger.log('[WARNING] autobase.update failed while waiting for flushable writer:', e?.message ?? e)
+        // `autobase.update()` itself is not bounded. In the exact degraded
+        // state this guard is meant to detect it can remain pending forever,
+        // which previously prevented the outer deadline from ever being
+        // checked and made the UI request time out. Give one update cycle a
+        // short chance to settle, then refuse the mutation without appending.
+        let updateTimer = null
+        const updateSettled = await Promise.race([
+            Promise.resolve()
+                .then(() => ab.update())
+                .then(() => true, (e) => {
+                    logger.log('[WARNING] autobase.update failed while waiting for flushable writer:', e?.message ?? e)
+                    return true
+                }),
+            new Promise((resolve) => {
+                updateTimer = setTimeout(() => resolve(false), FLUSHABLE_UPDATE_WAIT_MS)
+            }),
+        ])
+        if (updateTimer) clearTimeout(updateTimer)
+        if (!updateSettled) {
+            logger.log('[WARNING] autobase.update timed out while waiting for flushable writer')
+            return false
         }
         await new Promise((resolve) => setTimeout(resolve, FLUSHABLE_POLL_MS))
     }
@@ -106,6 +128,23 @@ function refuseStalledMutation (operationType) {
     return false
 }
 
+// An append can succeed at the writer-core level while apply() drops it because
+// it was encrypted with a stale epoch key. That used to return ok:true to the
+// UI even though the list never changed. Refuse before append and surface a
+// persistent explanation until an owner grant repairs the local key.
+function refuseStaleEpochMutation (view, operationType) {
+    const expectedHash = view.membershipState?.currentEpochKeyHash
+    if (!expectedHash || epochKeyHashHex(view.epochKey) === expectedHash) return false
+    logger.log(`[WARNING] ${operationType} refused; local epoch key does not match current membership epoch`)
+    try {
+        const req = rpc.request(RPC_MESSAGE)
+        req.send(JSON.stringify({ type: 'epoch-key-stale', message: 'Cannot save changes until this device receives the current encryption grant.' }))
+    } catch (e) {
+        logger.log('[ERROR] Failed to send epoch-key-stale message:', e)
+    }
+    return true
+}
+
 // Exported so the membership re-key flow (rekey.mjs) can serialize its
 // epoch-rotation appends against list writes through the same chain — otherwise
 // a concurrent addItem could land between the epoch flip and the re-encrypted
@@ -114,9 +153,18 @@ export function enqueueWrite (fn, ctx) {
     // ensures writes run one-at-a-time even if RPC calls arrive concurrently.
     // Per-base chain so a stalled shared base never serializes behind/ahead of
     // personal writes. No ctx (rekey.mjs, personal callers) → the personal chain.
-    const key = ctxView(ctx).chainKey
+    const view = ctxView(ctx)
+    const key = view.chainKey
     const prev = _writeChains.get(key) || Promise.resolve()
-    const next = prev.then(fn, fn)
+    // Flushability is a QUEUE invariant, not a caller convention. Maintenance
+    // writers (epoch repair, rekey, restore, future migrations) share this same
+    // boundary with UI mutations, so none can accidentally start an Autobase
+    // append that retries forever and wedges every edit behind it.
+    const run = async () => {
+        if (!(await waitForFlushableWriter(view))) return refuseStalledMutation('WRITE')
+        return fn()
+    }
+    const next = prev.then(run, run)
     _writeChains.set(key, next)
     return next
 }
@@ -177,6 +225,7 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
         }
         return false
     }
+    if (refuseStaleEpochMutation(v, 'ADD')) return false
 
     logger.log('[INFO] Command RPC_ADD addItem')
 
@@ -252,6 +301,7 @@ export async function updateItem (item, ctx = null) {
         }
         return false
     }
+    if (refuseStaleEpochMutation(v, 'UPDATE')) return false
 
     logger.log('[INFO] Command RPC_UPDATE updateItem')
 
@@ -311,6 +361,7 @@ export async function deleteItem (item, ctx = null) {
         }
         return false
     }
+    if (refuseStaleEpochMutation(v, 'DELETE')) return false
 
     logger.log('[INFO] Command RPC_DELETE deleteItem')
 
@@ -369,6 +420,7 @@ export async function moveItem (payload, ctx = null) {
         }
         return false
     }
+    if (refuseStaleEpochMutation(v, 'MOVE')) return false
 
     const source = payload?.item
     if (!source || typeof source !== 'object' || !source.id) {

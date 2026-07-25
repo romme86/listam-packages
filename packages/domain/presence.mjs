@@ -16,10 +16,11 @@
 //   • sessionStartedAt   — when the current online session began → "online since"
 //   • cumulativeOnlineMs — total observed online time across sessions (self-accounted)
 //   • sessionCount       — number of online sessions → avg = cumulativeOnlineMs / sessionCount
-// Self-asserted: a device only ever writes its OWN key, so there is no contention;
-// LWW by updatedAt (== lastActiveAt on a heartbeat). `attestedBy` is reserved for a
-// future observer-attested variant (a writer hub publishing a blind/leaf peer's
-// presence keyed by that peer's key); it is null on a normal self-published beat.
+// Self-asserted: a current device writes its OWN key, so there is no contention;
+// LWW by updatedAt (== lastActiveAt on a heartbeat). During rolling upgrades the
+// owner may also publish an observer-attested entry for an older writer that has
+// no heartbeat support. `attestedBy` identifies that owner; it is null on a
+// normal self-published beat, which always takes over after the old client upgrades.
 
 export const PRESENCE_LIST_ID = '__presence__'
 export const PRESENCE_LIST_TYPE = 'presence'
@@ -72,6 +73,30 @@ export function buildPresenceItem ({
         sessionCount: Math.max(0, numberOr(sessionCount, 0)),
         attestedBy: typeof attestedBy === 'string' && attestedBy ? attestedBy : null,
     }
+}
+
+// Build an owner-observed presence entry for a legacy writer. Preserve any
+// accumulated fields from an earlier attestation; only last-active/interaction
+// advance. The backend deliberately does not call this when a self-published
+// (attestedBy=null) entry exists, so observer data never replaces a modern
+// device's richer session accounting.
+export function buildAttestedPresenceItem ({
+    writerKey,
+    observedAt = 0,
+    attestedBy,
+    existing = null,
+} = {}) {
+    const observed = Math.max(0, numberOr(observedAt, 0))
+    return buildPresenceItem({
+        writerKey,
+        lastActiveAt: Math.max(numberOr(existing?.lastActiveAt, 0), observed),
+        lastInteractionAt: Math.max(numberOr(existing?.lastInteractionAt, 0), observed),
+        sessionStartedAt: numberOr(existing?.sessionStartedAt, 0),
+        cumulativeOnlineMs: Math.max(0, numberOr(existing?.cumulativeOnlineMs, 0)),
+        sessionCount: Math.max(0, numberOr(existing?.sessionCount, 0)),
+        updatedAt: Math.max(numberOr(existing?.updatedAt, 0), observed),
+        attestedBy,
+    })
 }
 
 // Reduce presence items to Map<writerKeyHex, entry>: newest updatedAt wins per id.

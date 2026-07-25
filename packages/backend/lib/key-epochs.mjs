@@ -15,8 +15,47 @@ const HEX = /^[0-9a-f]+$/i
 export function createEpochEncryptionKeyPair(secretKey = null) {
     if (!secretKey) return encryptionKeyPair()
 
-    const seed = normalizeBuffer(secretKey, EPOCH_SECRET_KEY_BYTES)
-    return seed ? encryptionKeyPair(seed) : null
+    // `hypercore-crypto.encryptionKeyPair(value)` treats `value` as a seed,
+    // not as an already-generated X25519 secret key. Epoch encryption secrets
+    // are persisted as the latter, so passing a restored secret back through
+    // encryptionKeyPair() silently derives a different identity after every
+    // restart. Reconstruct the matching public key directly from the stored
+    // scalar instead.
+    const restoredSecretKey = normalizeBuffer(secretKey, EPOCH_SECRET_KEY_BYTES)
+    if (!restoredSecretKey) return null
+
+    const publicKey = Buffer.alloc(EPOCH_PUBLIC_KEY_BYTES)
+    sodium.crypto_scalarmult_base(publicKey, restoredSecretKey)
+    return { publicKey, secretKey: restoredSecretKey }
+}
+
+// One-time compatibility repair for secrets persisted by releases that treated
+// an already-generated X25519 secret as an encryptionKeyPair() seed on restart.
+// A device that JOINED while running one of those releases registered the
+// derived public key in the owner-signed membership log. Restoring the scalar
+// correctly later therefore produces a different public identity and makes all
+// otherwise-valid epoch grants undecryptable.
+//
+// The membership log is the authority here: only adopt the legacy derivation
+// when its public key exactly matches the public key signed for this writer.
+// The caller then persists the returned *derived scalar*, so subsequent boots
+// restore the same identity through the normal, corrected path.
+export function reconcileLegacyEpochEncryptionKeyPair(keyPair, expectedPublicKey) {
+    const secretKey = normalizeBuffer(keyPair?.secretKey, EPOCH_SECRET_KEY_BYTES)
+    const currentPublicKey = normalizeBuffer(keyPair?.publicKey, EPOCH_PUBLIC_KEY_BYTES)
+    const expected = normalizeBuffer(expectedPublicKey, EPOCH_PUBLIC_KEY_BYTES)
+    if (!secretKey || !currentPublicKey || !expected) {
+        return { keyPair, migrated: false, matched: false, reason: 'invalid-input' }
+    }
+    if (currentPublicKey.equals(expected)) {
+        return { keyPair, migrated: false, matched: true, reason: null }
+    }
+
+    const legacyKeyPair = encryptionKeyPair(secretKey)
+    if (!normalizeBuffer(legacyKeyPair?.publicKey, EPOCH_PUBLIC_KEY_BYTES)?.equals(expected)) {
+        return { keyPair, migrated: false, matched: false, reason: 'membership-key-mismatch' }
+    }
+    return { keyPair: legacyKeyPair, migrated: true, matched: true, reason: null }
 }
 
 export function epochPublicKeyHex(keyPair) {

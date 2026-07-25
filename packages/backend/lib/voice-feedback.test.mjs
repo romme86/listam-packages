@@ -35,12 +35,12 @@ test('wake + command + save -> yellow, purple, green', async () => {
     assert.equal(reply.dones, 1)
 })
 
-test('direct petito command authorizes the fast capture path', async () => {
+test('direct petito command is gated because petito is reserved for local music', async () => {
     const reply = recordingReply()
     const ctrl = recordingController()
     await handlerFor(sttFor('petito add milk'), ctrl)({ wake: { fired: false, prob: 0.02 } }, reply)
-    assert.deepEqual(reply.leds, ['yellow', 'purple', 'green'])
-    assert.equal(ctrl.executed.length, 1)
+    assert.deepEqual(reply.leds, ['yellow', 'purple', 'red'])
+    assert.equal(ctrl.executed.length, 0)
 })
 
 test('anchored "add milk" without the full wake phrase is gated', async () => {

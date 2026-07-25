@@ -32,9 +32,11 @@
     "bare-url": "^2.4.3",
     "blind-pairing": "^2.3.1",
     "corestore": "^7.5.0",
+    "compact-encoding": "^3.0.0",
     "hypercore-crypto": "^3.6.1",
     "hyperdht": "^6.27.0",
     "hyperswarm": "^4.12.1",
+    "protomux": "^3.11.0",
     "sodium-universal": "^5.0.1",
     "z32": "^1.1.0"
   },
