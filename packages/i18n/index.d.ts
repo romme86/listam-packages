@@ -80,6 +80,7 @@ export type MessageKey =
     | 'main.notification.writeEpochStale'
     | 'main.notification.writeSyncStalled'
     | 'main.notification.writeBackendUnresponsive'
+    | 'main.notification.writeStorageFenced'
     | 'main.notification.undone'
     | 'main.notification.nothingToUndo'
     | 'main.notification.undoConflict'

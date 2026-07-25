@@ -17,6 +17,7 @@ import { isBoardType, applyStatusTransition, doneStatusesOf, validateTicketDraft
 import { buildMovedItem, isSameSurfaceMove } from './list-move.mjs'
 import { isInternalChannelItem } from './shared-creds.mjs'
 import { isPresenceItem } from '@listam/domain/presence'
+import { isFenced, fenceReason } from './fence.mjs'
 
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
 // One write chain PER BASE. The personal base uses the '__personal__' chain
@@ -117,6 +118,25 @@ export async function waitForFlushableWriter (view) {
     }
 }
 
+// A fenced backend has lost ownership of its storage root to another process.
+// Writing anyway would put two writers on one Corestore, which is the exact
+// corruption the lease exists to prevent — so every mutation path checks this
+// FIRST, before touching the write chain or the writer pipeline.
+function refuseFencedMutation (operationType) {
+    logger.log(`[ERROR] ${operationType} refused; this backend no longer owns its storage root (${fenceReason()})`)
+    try {
+        const req = rpc.request(RPC_MESSAGE)
+        req.send(JSON.stringify({
+            type: 'storage-fenced',
+            reason: fenceReason(),
+            message: 'Cannot save changes: another Listam instance took over this data directory. Restart the app.',
+        }))
+    } catch (e) {
+        logger.log('[ERROR] Failed to send storage-fenced message:', e)
+    }
+    return false
+}
+
 function refuseStalledMutation (operationType) {
     logger.log(`[WARNING] ${operationType} refused; local writer cannot flush (peers/DHT unreachable?)`)
     try {
@@ -161,6 +181,7 @@ export function enqueueWrite (fn, ctx) {
     // boundary with UI mutations, so none can accidentally start an Autobase
     // append that retries forever and wedges every edit behind it.
     const run = async () => {
+        if (isFenced()) return refuseFencedMutation('WRITE')
         if (!(await waitForFlushableWriter(view))) return refuseStalledMutation('WRITE')
         return fn()
     }
@@ -265,6 +286,7 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
+        if (isFenced()) return refuseFencedMutation('ADD')
         if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('ADD')
         // Get length before append to verify it increases
         // const lengthBefore = v.autobase.local.length
@@ -325,6 +347,7 @@ export async function updateItem (item, ctx = null) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
+        if (isFenced()) return refuseFencedMutation('UPDATE')
         if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('UPDATE')
         const lengthBefore = v.autobase.local.length
 
@@ -374,6 +397,7 @@ export async function deleteItem (item, ctx = null) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
+        if (isFenced()) return refuseFencedMutation('DELETE')
         if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('DELETE')
         const lengthBefore = v.autobase.local.length
 
@@ -472,6 +496,7 @@ export async function moveItem (payload, ctx = null) {
             logger.log('[WARNING] Mutation requested while Autobase is closing; ignoring.')
             return false
         }
+        if (isFenced()) return refuseFencedMutation('MOVE')
         if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('MOVE')
 
         if (sameBucket) {

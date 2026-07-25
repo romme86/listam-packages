@@ -204,6 +204,7 @@ export const IT_MESSAGES = {
     'main.notification.writeEpochStale': 'Le modifiche non vengono ancora salvate: in attesa della chiave di cifratura corrente per questo dispositivo.',
     'main.notification.writeSyncStalled': 'Le modifiche non vengono salvate: nessun peer raggiungibile per la sincronizzazione.',
     'main.notification.writeBackendUnresponsive': 'Le modifiche non vengono salvate: il backend locale non risponde. Riavvia Listam per ripristinarlo.',
+    'main.notification.writeStorageFenced': 'Le modifiche non vengono salvate — un’altra istanza di Listam ha preso il controllo di questa cartella dati. Riavvia Listam.',
     'main.notification.undone': 'Annullato',
     'main.notification.nothingToUndo': 'Niente da annullare',
     'main.notification.undoConflict': 'Impossibile annullare: questo articolo è cambiato',

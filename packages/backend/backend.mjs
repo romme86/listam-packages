@@ -44,6 +44,7 @@ import {loadAutobaseKey, saveAutobaseKey, loadEncryptionKey, saveEncryptionKey, 
 import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, resyncAuthorizedEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery} from "./lib/network.mjs"
 import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
+import { fence, clearFence } from './lib/fence.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
 import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.mjs'
 import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet, startScheduledBackups, stopScheduledBackups, scheduleState, setScheduleEnabled } from './lib/auto-backup.mjs'
@@ -182,6 +183,8 @@ export async function startBackend(platform) {
     const instanceId = Math.random().toString(36).slice(2, 8)
     logger.log('[INFO] BACKEND INSTANCE:', instanceId)
     shutdownStarted = false
+    // A new instance starts unfenced; the latch is per-backend, not per-process.
+    clearFence()
 
     const paths = createBackendPaths(platform)
     storagePath = paths.storagePath
@@ -224,7 +227,28 @@ export async function startBackend(platform) {
     }
     storageLease = lease
     storageLease.startHeartbeat(() => {
-        logger.log(`[ERROR] [${instanceId}] Storage lease was lost to another instance; this backend no longer owns the storage root`)
+        // Losing the lease means another process now owns this Corestore root.
+        // Logging it was not enough: this instance kept appending, putting two
+        // writers on one storage root — the exact corruption the lease exists to
+        // prevent. Latch the fence FIRST (synchronous, so no write can slip
+        // through while teardown is still awaiting), then tell the host, then
+        // release the resources.
+        fence('storage-lease-lost')
+        logger.log(`[ERROR] [${instanceId}] Storage lease was lost to another instance; fencing this backend`)
+        try {
+            rpc?.request(RPC_MESSAGE).send(JSON.stringify({
+                type: 'storage-fenced',
+                reason: 'storage-lease-lost',
+                message: 'Another Listam instance took over this data directory. Restart the app.',
+            }))
+        } catch (e) {
+            logger.log('[ERROR] Failed to notify host of lease loss:', e?.message ?? e)
+        }
+        // Drop networking and storage. Deliberately NOT via the normal shutdown
+        // path: that releases the lease, and the lease is no longer ours to
+        // release (storage-lease.release() already refuses to delete another
+        // instance's file, but going nowhere near it is clearer).
+        fencedTeardown().catch((e) => logger.log('[ERROR] Fenced teardown failed:', e?.message ?? e))
     })
     logger.log(`[INFO] [${instanceId}] Acquired storage lease:`, lockPath)
 
@@ -716,6 +740,17 @@ async function reconcileLegacyKeyFiles({
     // invite is an expiring bearer secret (H3); neither is ever re-stored.
     deleteLegacyKeyFile(localWriterKeyFilePath)
     deleteLegacyInviteFile(legacyInviteFilePath)
+}
+
+// Teardown after losing the storage lease. Deliberately reuses the ordinary
+// shutdown path rather than duplicating it: the two writes it performs are
+// already safe once fenced — the final presence beat goes through updateItem,
+// which refuses while fenced, and storage-lease.release() refuses to delete a
+// lease file whose instanceId is not ours. Reusing it means the fenced path
+// closes exactly the same resources as a clean stop, with no second list to
+// keep in sync.
+async function fencedTeardown() {
+    await shutdownBackend()
 }
 
 export async function shutdownBackend() {

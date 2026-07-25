@@ -204,6 +204,7 @@ export const DE_MESSAGES = {
     'main.notification.writeEpochStale': 'Änderungen werden noch nicht gespeichert – dieses Gerät wartet auf die aktuelle Verschlüsselungsfreigabe.',
     'main.notification.writeSyncStalled': 'Änderungen werden nicht gespeichert – dieses Gerät erreicht keinen Peer zum Synchronisieren.',
     'main.notification.writeBackendUnresponsive': 'Änderungen werden nicht gespeichert – das lokale Backend antwortet nicht. Starten Sie Listam neu.',
+    'main.notification.writeStorageFenced': 'Änderungen werden nicht gespeichert — eine andere Listam-Instanz hat diesen Datenordner übernommen. Starte Listam neu.',
     'main.notification.undone': 'Rückgängig gemacht',
     'main.notification.nothingToUndo': 'Nichts rückgängig zu machen',
     'main.notification.undoConflict': 'Rückgängig nicht möglich – dieser Artikel wurde geändert',

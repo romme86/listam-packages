@@ -204,6 +204,7 @@ export const FR_MESSAGES = {
     'main.notification.writeEpochStale': 'Les modifications ne sont pas encore enregistrées : cet appareil attend son autorisation de chiffrement actuelle.',
     'main.notification.writeSyncStalled': 'Les modifications ne sont pas enregistrées : aucun pair joignable pour se synchroniser.',
     'main.notification.writeBackendUnresponsive': 'Les modifications ne sont pas enregistrées : le backend local ne répond plus. Redémarrez Listam.',
+    'main.notification.writeStorageFenced': 'Les modifications ne sont pas enregistrées — une autre instance de Listam a pris le contrôle de ce dossier de données. Redémarrez Listam.',
     'main.notification.undone': 'Annulé',
     'main.notification.nothingToUndo': 'Rien à annuler',
     'main.notification.undoConflict': 'Annulation impossible : cet article a changé',

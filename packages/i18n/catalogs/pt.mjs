@@ -204,6 +204,7 @@ export const PT_MESSAGES = {
     'main.notification.writeEpochStale': 'As alterações ainda não estão a ser guardadas — este dispositivo aguarda a autorização de encriptação atual.',
     'main.notification.writeSyncStalled': 'As alterações não estão a ser guardadas — este dispositivo não consegue alcançar nenhum par para sincronizar.',
     'main.notification.writeBackendUnresponsive': 'As alterações não estão a ser guardadas — o backend local deixou de responder. Reinicie o Listam.',
+    'main.notification.writeStorageFenced': 'As alterações não estão a ser guardadas — outra instância do Listam assumiu esta pasta de dados. Reinicie o Listam.',
     'main.notification.undone': 'Anulado',
     'main.notification.nothingToUndo': 'Nada para anular',
     'main.notification.undoConflict': 'Não é possível anular — esse artigo mudou',

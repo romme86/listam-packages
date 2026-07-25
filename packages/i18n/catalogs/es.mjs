@@ -204,6 +204,7 @@ export const ES_MESSAGES = {
     'main.notification.writeEpochStale': 'Los cambios aun no se guardan: este dispositivo espera su permiso de cifrado actual.',
     'main.notification.writeSyncStalled': 'Los cambios no se guardan: este dispositivo no puede conectarse con ningun par para sincronizar.',
     'main.notification.writeBackendUnresponsive': 'Los cambios no se guardan: el backend local no responde. Reinicia Listam para recuperarlo.',
+    'main.notification.writeStorageFenced': 'Los cambios no se están guardando: otra instancia de Listam ha tomado el control de esta carpeta de datos. Reinicia Listam.',
     'main.notification.undone': 'Deshecho',
     'main.notification.nothingToUndo': 'Nada que deshacer',
     'main.notification.undoConflict': 'No se puede deshacer: ese elemento cambio',
