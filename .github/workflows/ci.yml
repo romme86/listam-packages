@@ -16,7 +16,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       # npm workspaces: this links every @listam/* package to its sibling in
       # packages/, which is what the test suite imports.
