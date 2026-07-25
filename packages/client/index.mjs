@@ -245,3 +245,5 @@ function invalidJson(command, raw, error) {
         error: error instanceof Error ? error.message : String(error),
     }
 }
+
+export { decodeSyncListSnapshot } from './sync-list-snapshot.mjs'

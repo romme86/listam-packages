@@ -47,3 +47,20 @@ export type BackendChannel = {
     }
 }
 export function createBackendChannel(): BackendChannel
+
+export type LegacySyncListSnapshot = { mode: 'legacy'; items: any[]; baseKey: string | null }
+export type BucketSyncListSnapshot = {
+    mode: 'bucket'
+    listId: string
+    listType: string
+    items: any[]
+    baseKey: string | null
+}
+export type SyncListSnapshot = LegacySyncListSnapshot | BucketSyncListSnapshot
+
+/**
+ * Decode a SYNC_LIST payload. Handles the bare `Item[]`, the shared
+ * `{ list, baseKey }` envelope, and the exact `{ list, listId, listType }`
+ * bucket envelope. Degrades to `legacy` rather than dropping a snapshot.
+ */
+export function decodeSyncListSnapshot(value: unknown): SyncListSnapshot | null

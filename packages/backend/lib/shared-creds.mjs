@@ -21,10 +21,15 @@
 // In the common single-user case the personal base's members are just your own
 // devices, which is exactly the intent.
 
+// The two list TYPES are declared in @listam/domain/meta alongside every other
+// reserved bucket, so `isMetaItem` has one complete definition of "reserved" and
+// cannot silently miss these. Re-exported here because this module owns their
+// builders and reducers.
+import { SHARED_CREDS_LIST_TYPE, SHARED_JOINREQ_LIST_TYPE } from '@listam/domain/meta'
+export { SHARED_CREDS_LIST_TYPE, SHARED_JOINREQ_LIST_TYPE }
+
 export const SHARED_CREDS_LIST_ID = '__sharedcreds__'
-export const SHARED_CREDS_LIST_TYPE = 'sharedcreds'
 export const SHARED_JOINREQ_LIST_ID = '__sharedjoinreq__'
-export const SHARED_JOINREQ_LIST_TYPE = 'sharedjoinreq'
 
 export function isSharedCredItem (item) {
     return !!item && typeof item === 'object' && item.listType === SHARED_CREDS_LIST_TYPE

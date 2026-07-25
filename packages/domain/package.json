@@ -62,6 +62,10 @@
     },
     "./voice-intent": {
       "default": "./voice-intent.mjs"
+    },
+    "./meta": {
+      "types": "./meta.d.ts",
+      "default": "./meta.mjs"
     }
   },
   "files": [
