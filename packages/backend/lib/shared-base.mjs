@@ -18,6 +18,7 @@ import b4a from 'b4a'
 import hypercoreCrypto from 'hypercore-crypto'
 import { apply, open, swarmBootstrap } from '../backend.mjs'
 import { getBackendFs } from './platform-fs.mjs'
+import { hardenSecretDir, tightenSecretFile, writeSecretFileAtomic } from './secret-file.mjs'
 import { logger } from './logger.mjs'
 import { createListOperation } from './list-reducer.mjs'
 import { reduceRegistry, isRegistryItem } from './list-registry.mjs'
@@ -133,7 +134,13 @@ export function sharedDirNameForInvite (invite) {
 const SECRET_FILES = { epoch: 'epoch.key', epochEnc: 'epoch-enc.key', owner: 'owner.key' }
 
 function writeSecretFile (storageDir, name, hex) {
-    try { getBackendFs().writeFileSync(`${storageDir}/${name}`, hex); return true } catch (e) { logger.log('[ERROR] shared secret persist', name, e); return false }
+    const fsA = getBackendFs()
+    // 0600 + temp/fsync/rename. A plain writeFileSync left these 0644 under the
+    // usual umask while the personal-base store already used 0600, and a crash
+    // mid-write could truncate the ONLY copy of an epoch key — which makes that
+    // shared base permanently undecryptable.
+    hardenSecretDir(fsA, storageDir)
+    return writeSecretFileAtomic(fsA, `${storageDir}/${name}`, hex)
 }
 
 function readSecretFile (storageDir, name) {
@@ -141,6 +148,10 @@ function readSecretFile (storageDir, name) {
         const fsA = getBackendFs()
         const p = `${storageDir}/${name}`
         if (!fsA.existsSync(p)) return null
+        // Migration: keys written by an earlier build are 0644. Narrow them the
+        // first time we read one, rather than waiting for a rewrite that a
+        // stable base may never perform.
+        tightenSecretFile(fsA, p)
         const hex = fsA.readFileSync(p, 'utf8').trim().toLowerCase()
         return /^[0-9a-f]+$/.test(hex) && hex.length % 2 === 0 ? hex : null
     } catch (e) { logger.log('[ERROR] shared secret read', name, e); return null }
@@ -196,6 +207,7 @@ export async function openSharedBase (ctx, { baseKey = null, encryptionKey = nul
     const keyFile = `${storageDir}/encryption.key`
     let encKey = encryptionKey
     if (!encKey && fsA.existsSync(keyFile)) {
+        tightenSecretFile(fsA, keyFile)
         const hex = fsA.readFileSync(keyFile, 'utf8').trim().toLowerCase()
         if (ENC_HEX.test(hex)) encKey = b4a.from(hex, 'hex')
     }
@@ -225,7 +237,8 @@ export async function openSharedBase (ctx, { baseKey = null, encryptionKey = nul
     // can decrypt epoch-encrypted ops and the owner regains invite authority.
     loadSharedSecrets(ctx)
     if (ctx.autobase.encryptionKey && !fsA.existsSync(keyFile)) {
-        try { fsA.writeFileSync(keyFile, b4a.toString(ctx.autobase.encryptionKey, 'hex')) } catch (e) { logger.log('[ERROR] shared base key persist:', e) }
+        hardenSecretDir(fsA, storageDir)
+        writeSecretFileAtomic(fsA, keyFile, b4a.toString(ctx.autobase.encryptionKey, 'hex'))
     }
     await ctx.autobase.update()
     // Autobase does not re-run apply over history on reopen; rebuild this base's
