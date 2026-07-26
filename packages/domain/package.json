@@ -66,6 +66,10 @@
     "./meta": {
       "types": "./meta.d.ts",
       "default": "./meta.mjs"
+    },
+    "./authoritative-base": {
+      "types": "./authoritative-base.d.ts",
+      "default": "./authoritative-base.mjs"
     }
   },
   "files": [
