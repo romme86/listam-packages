@@ -165,122 +165,169 @@ function cleanupTempSwarm() {
     }
 }
 
+// Join watch: wait for this guest to become writable, then for the main swarm
+// to connect.
+//
+// This used to poll autobase.update() once a second for up to 120 seconds, and
+// on EVERY tick rebuild the whole list from persisted ops and push it to the
+// frontend — 120 full projections and 120 full re-renders for one join. Autobase
+// emits 'update' when the linearized view advances and Hyperswarm emits
+// 'connection'; those are the actual signals, so the watch is driven by them and
+// keeps only a slow fallback poll in case one is missed.
+//
+// A generation token guards every callback. A second join (or a base switch)
+// supersedes the first, and without it a late callback from the old attempt
+// could report success for a base that is no longer current.
+const JOIN_TIMEOUT_MS = 120_000
+const JOIN_FALLBACK_POLL_MS = 5000
+let _joinGeneration = 0
+let _joinDetach = null
+
+function endJoinWatch() {
+    if (_joinDetach) {
+        try { _joinDetach() } catch (_) {}
+        _joinDetach = null
+    }
+    if (_writableCheckTimer) {
+        clearTimeout(_writableCheckTimer)
+        _writableCheckTimer = null
+    }
+}
+
 function waitForWritable() {
-    if (_writableCheckTimer) clearTimeout(_writableCheckTimer)
-    let attempts = 0
-    const MAX_ATTEMPTS = 120
+    endJoinWatch()
+    const gen = ++_joinGeneration
+    const deadline = Date.now() + JOIN_TIMEOUT_MS
+    // The view length is an exact, O(1) answer to "has anything new linearized?",
+    // so the expensive rebuild+push only runs when there is genuinely more to
+    // show — not on every wake-up.
+    let pushedAtViewLength = -1
+    let busy = false
+    let phase = 'writable'
 
-    async function check() {
-        if (!isPendingJoinSuccess) return
-        attempts++
-        try {
-            if (autobase) await autobase.update()
-        } catch (e) {
-            logger.log('[ERROR] waitForWritable update failed:', e)
-        }
-        // Clean up temp swarm as soon as main swarm has connections
-        // (prevents host from seeing double peer count)
-        if (_tempSwarm && swarm?.connections?.size > 0) {
-            logger.log('[INFO] Main swarm connected, cleaning up temp swarm')
-            cleanupTempSwarm()
-        }
+    const current = () => gen === _joinGeneration && isPendingJoinSuccess
 
-        // Sync whatever items have replicated so far
+    function finish(kind, message) {
+        if (!current()) return
+        endJoinWatch()
+        setIsPendingJoinSuccess(false)
+        broadcastMessage(kind === 'error' ? { type: 'join-error', message } : { type: 'join-success' })
+        broadcastNetworkStatus()
+        cleanupTempSwarm()
+    }
+
+    async function syncWhatHasArrived() {
+        const viewLength = autobase?.view?.length ?? 0
+        if (viewLength === pushedAtViewLength) return
+        pushedAtViewLength = viewLength
         try {
             const list = await rebuildListFromPersistedOps()
             setCurrentList(list)
             if (list.length > 0) syncListToFrontend(list)
             projectItemsToFrontend(await rebuildExtraListItems())
-        } catch (_) {}
-
-        // Log status every 10 attempts
-        if (attempts % 10 === 0) {
-            const viewLen = autobase?.view?.length ?? '?'
-            const mainConns = swarm?.connections?.size ?? '?'
-            const tempConns = _tempSwarm?.connections?.size ?? 0
-            logger.log(`[INFO] waitForWritable #${attempts}: writable=${autobase?.writable}, view=${viewLen}, mainSwarm=${mainConns}, tempSwarm=${tempConns}`)
+        } catch (e) {
+            logger.log('[WARNING] join watch: partial sync failed:', e?.message ?? e)
         }
+    }
 
-        if (autobase?.writable) {
-            if (autobase.key) saveAutobaseKey(autobase.key)
-            if (autobase.encryptionKey) {
-                setEncryptionKey(autobase.encryptionKey)
-                saveEncryptionKey(autobase.encryptionKey)
+    async function evaluate() {
+        if (!current() || busy) return
+        busy = true
+        try {
+            try {
+                if (autobase) await autobase.update()
+            } catch (e) {
+                logger.log('[ERROR] join watch: autobase.update failed:', e?.message ?? e)
             }
-            logger.log('[INFO] Guest became writable after', attempts, 'attempt(s)')
+            if (!current()) return
 
-            // Rebroadcast the roster now that writable flipped true, so the
-            // frontend can advertise a device name that was set (and refused)
-            // while the base was still read-only. Cheap and idempotent.
-            broadcastMembershipRoster()
-            // Now that this guest can append, fire a presence beat so it shows
-            // online to peers without waiting a full heartbeat cadence.
-            pokePresence()
-
-            // Phase 3: syncing — wait for main swarm peer connection
-            if (swarm?.connections?.size > 0) {
-                // Already connected, done!
-                setIsPendingJoinSuccess(false)
-                broadcastMessage({ type: 'join-success' })
-                broadcastNetworkStatus()
+            // Drop the temp swarm as soon as the main one is up, so the host does
+            // not count this guest twice.
+            if (_tempSwarm && swarm?.connections?.size > 0) {
+                logger.log('[INFO] Main swarm connected, cleaning up temp swarm')
                 cleanupTempSwarm()
+            }
+
+            await syncWhatHasArrived()
+            if (!current()) return
+
+            if (phase === 'writable' && autobase?.writable) {
+                if (autobase.key) saveAutobaseKey(autobase.key)
+                if (autobase.encryptionKey) {
+                    setEncryptionKey(autobase.encryptionKey)
+                    saveEncryptionKey(autobase.encryptionKey)
+                }
+                logger.log('[INFO] Guest became writable')
+
+                // Rebroadcast the roster now that writable flipped true, so the
+                // frontend can advertise a device name that was set (and refused)
+                // while the base was still read-only. Cheap and idempotent.
+                broadcastMembershipRoster()
+                // Now that this guest can append, fire a presence beat so it shows
+                // online to peers without waiting a full heartbeat cadence.
+                pokePresence()
+
+                if (swarm?.connections?.size > 0) {
+                    finish('success')
+                    return
+                }
+                phase = 'syncing'
+                broadcastJoinPhase('syncing')
+                cleanupTempSwarm()
+            }
+
+            if (phase === 'syncing' && swarm?.connections?.size > 0) {
+                logger.log('[INFO] Guest main swarm connected')
+                finish('success')
                 return
             }
 
-            // Switch to syncing phase and wait for main swarm connection
-            broadcastJoinPhase('syncing')
-            cleanupTempSwarm()
-            waitForPeerConnection(MAX_ATTEMPTS - attempts)
-            return
+            if (Date.now() >= deadline) {
+                if (phase === 'syncing') {
+                    // Writable but no peer yet: the join DID work, so report
+                    // success rather than an error the user cannot act on.
+                    logger.log('[INFO] Syncing phase timed out, but guest is writable — reporting success')
+                    finish('success')
+                } else {
+                    logger.log('[ERROR] Timed out waiting for write access.', {
+                        view: autobase?.view?.length ?? null,
+                        mainSwarm: swarm?.connections?.size ?? null,
+                        tempSwarm: _tempSwarm?.connections?.size ?? 0,
+                    })
+                    finish('error', 'Timed out waiting for write access from host.')
+                }
+            }
+        } finally {
+            busy = false
         }
-        if (attempts >= MAX_ATTEMPTS) {
-            setIsPendingJoinSuccess(false)
-            const viewLen = autobase?.view?.length ?? '?'
-            const mainConns = swarm?.connections?.size ?? '?'
-            const tempConns = _tempSwarm?.connections?.size ?? 0
-            logger.log(`[ERROR] Timed out waiting for write access after ${attempts} attempts. view=${viewLen}, mainSwarm=${mainConns}, tempSwarm=${tempConns}`)
-            broadcastMessage({ type: 'join-error', message: 'Timed out waiting for write access from host.' })
-            broadcastNetworkStatus()
-            cleanupTempSwarm()
-            return
-        }
-        _writableCheckTimer = setTimeout(check, 1000)
     }
 
-    _writableCheckTimer = setTimeout(check, 1000)
-}
+    const onSignal = () => { void evaluate() }
+    const base = autobase
+    const mainSwarm = swarm
+    try { base?.on('update', onSignal) } catch (_) {}
+    try { mainSwarm?.on('connection', onSignal) } catch (_) {}
 
-// Waits for the main swarm to establish at least one peer connection
-// (phase 3: "syncing"). Once connected, the guest's green badge appears.
-function waitForPeerConnection(remainingAttempts) {
-    let attempts = 0
-    const maxAttempts = Math.max(remainingAttempts, 30)
+    function tick() {
+        if (!current()) return
+        void evaluate()
+        if (current()) _writableCheckTimer = setTimeout(tick, JOIN_FALLBACK_POLL_MS)
+    }
+    _writableCheckTimer = setTimeout(tick, JOIN_FALLBACK_POLL_MS)
 
-    function check() {
-        if (!isPendingJoinSuccess) return
-        attempts++
-
-        if (swarm?.connections?.size > 0) {
-            setIsPendingJoinSuccess(false)
-            logger.log('[INFO] Guest main swarm connected after', attempts, 'syncing attempt(s)')
-            broadcastMessage({ type: 'join-success' })
-            broadcastNetworkStatus()
-            return
-        }
-
-        if (attempts >= maxAttempts) {
-            // Timed out waiting for peer, but we ARE writable — still success
-            setIsPendingJoinSuccess(false)
-            logger.log('[INFO] Syncing phase timed out, but guest is writable — sending join-success anyway')
-            broadcastMessage({ type: 'join-success' })
-            broadcastNetworkStatus()
-            return
-        }
-
-        _writableCheckTimer = setTimeout(check, 1000)
+    _joinDetach = () => {
+        try {
+            if (typeof base?.off === 'function') base.off('update', onSignal)
+            else base?.removeListener?.('update', onSignal)
+        } catch (_) {}
+        try {
+            if (typeof mainSwarm?.off === 'function') mainSwarm.off('connection', onSignal)
+            else mainSwarm?.removeListener?.('connection', onSignal)
+        } catch (_) {}
     }
 
-    _writableCheckTimer = setTimeout(check, 1000)
+    // Evaluate once immediately: the guest may already be writable.
+    void evaluate()
 }
 
 export function createInvite() {
@@ -407,11 +454,11 @@ export function setupBlindPairing() {
 }
 
 async function tearDownAutobaseSwarmStore() {
-    // Cancel any pending writable-check polling
-    if (_writableCheckTimer) {
-        clearTimeout(_writableCheckTimer)
-        _writableCheckTimer = null
-    }
+    // Stop any join watch AND detach its autobase/swarm listeners. Cancelling the
+    // timer alone used to be enough when the watch was pure polling; now that it
+    // is event-driven, a listener left on a torn-down base is both a leak and a
+    // way for a superseded join to report success for the wrong base.
+    endJoinWatch()
     setIsPendingJoinSuccess(false)
     for (const channel of _epochGrantChannels) channel.close()
     _epochGrantChannels.clear()
