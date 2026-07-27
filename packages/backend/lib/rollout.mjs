@@ -23,7 +23,12 @@ const FLAGS = {
     // Without it, turning rigor ON makes every pre-existing sparse ticket
     // droppable, and WHICH peer drops it depends on linearization order, so a
     // ticket can be announced and then discarded (apply-discard-reorder.test.mjs).
-    rigorNotRetroactive: false,
+    //
+    // FLIPPED 2026-07-27, one release after the code landed (dd6a169). Peers on
+    // an older build still drop those tickets, so the two disagree until every
+    // peer is updated — that window is the cost of the flip, and it closes as the
+    // last peer deploys.
+    rigorNotRetroactive: true,
 }
 
 const flags = { ...FLAGS }

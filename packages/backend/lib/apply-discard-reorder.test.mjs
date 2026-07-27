@@ -622,7 +622,7 @@ async function partition (...ctxs) {
 // dropped it. The two tests below read different things from it — one asserts
 // the row should never have been dropped (that is 2.1), the other asserts that
 // since it WAS dropped, the frontend is told (that is this step).
-async function stageRealDiscard (t) {
+async function stageRealDiscard (t, { rigorOnBeforeAdd = false } = {}) {
     const testnet = await createTestnet(3)
     const dirs = []
     const open = []
@@ -677,6 +677,14 @@ async function stageRealDiscard (t) {
 
     await partition(ctxA, ctxB)
 
+    // Partitioned, so the joined peer cannot see this either way. Appending it
+    // FIRST only changes the wall clock: the ticket written afterwards carries a
+    // stamp past the transition, even though its writer had no way to know.
+    if (rigorOnBeforeAdd) {
+        await ctxA.autobase.append(boardConfigNode(ctxA, true, 2))
+        await settle(ctxA, 4)
+    }
+
     // The joined peer adds a sparse ticket. Its own write-time rigor gate reads
     // rigorOn=false, so this is an ordinary, legal add — and its apply admits it
     // and tells its frontend.
@@ -707,9 +715,12 @@ async function stageRealDiscard (t) {
         'PRECONDITION: nothing has retracted the ticket yet',
     )
 
-    // Meanwhile the owner turns rigor back on.
-    await ctxA.autobase.append(boardConfigNode(ctxA, true, 2))
-    await settle(ctxA, 4)
+    // Meanwhile the owner turns rigor back on — after the add, so the ticket
+    // predates the transition.
+    if (!rigorOnBeforeAdd) {
+        await ctxA.autobase.append(boardConfigNode(ctxA, true, 2))
+        await settle(ctxA, 4)
+    }
 
     disconnect = connect(ctxA.store, ctxB.store)
     await settle(ctxA, 12)
@@ -748,7 +759,11 @@ test('END TO END SETTLED VERDICT: with the flag on, the merged history keeps the
 })
 
 test('END TO END CONVERGENCE: the discarded row is retracted on a real base', { timeout: 600_000 }, async (t) => {
-    const { ctxB, announced, frames } = await stageRealDiscard(t)
+    // Staged so the ticket's stamp lands AFTER the rigor-on transition, which is
+    // the case the timestamp rule cannot decide (KNOWN RESIDUAL) — so a row is
+    // still discarded here even with rigorNotRetroactive on, and the retraction
+    // still has something to correct.
+    const { ctxB, announced, frames } = await stageRealDiscard(t, { rigorOnBeforeAdd: true })
 
     // Non-vacuity: this test is only meaningful while the row really is dropped.
     // If 2.1 lands and the verdict stops depending on order, the todo test above
@@ -784,11 +799,18 @@ test('END TO END CONVERGENCE: the discarded row is retracted on a real base', { 
 // ---------------------------------------------------------------------------
 test('CONVERGENCE: a row announced on a discarded timeline is retracted after the reorg', async (t) => {
     const { ctx, forkPoint } = await ownedBase(t)
-    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1) })
+    // The residual scenario, which still discards with rigorNotRetroactive on: a
+    // peer that had not seen the rigor-on config writes a sparse ticket whose
+    // wall-clock stamp lands after the transition anyway. Stamps are explicit so
+    // this does not depend on two Date.now() calls landing in the same
+    // millisecond, which is what made an earlier version of this test pass by
+    // luck once the flag flipped.
+    const turnedOnAt = Date.now()
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1, turnedOnAt - 1000) })
 
-    const ticket = sparseTicket('ticket-retract')
+    const ticket = sparseTicket('ticket-retract', { timestamp: turnedOnAt + 1000 })
     const addOp = boardAddOp(ctx, ticket)
-    const rigorOn = boardConfigNode(ctx, true, 2)
+    const rigorOn = boardConfigNode(ctx, true, 2, turnedOnAt)
 
     const first = await runPass(ctx, [addOp, rigorOn], forkPoint)
     assert.equal(hasItemFrame(first.frames, ticket.id), true,
