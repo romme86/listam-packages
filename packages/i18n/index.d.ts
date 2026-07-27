@@ -81,6 +81,8 @@ export type MessageKey =
     | 'main.notification.writeSyncStalled'
     | 'main.notification.writeBackendUnresponsive'
     | 'main.notification.writeStorageFenced'
+    | 'main.notification.writeQueued'
+    | 'main.notification.writeNeedsDecision'
     | 'main.notification.undone'
     | 'main.notification.nothingToUndo'
     | 'main.notification.undoConflict'

@@ -75,7 +75,7 @@ import {
     isPendingJoinSuccess,
     setIsPendingJoinSuccess
 } from "./state.mjs"
-import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, readPersistedMembershipRecords, resetViewCheckpoint, syncListToFrontend, waitForFlushableWriter } from "./item.mjs"
+import { enqueueWrite, prepareListAppendOperation, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, readPersistedMembershipRecords, resetViewCheckpoint, syncListToFrontend, waitForFlushableWriter , tryReplayOutbox} from "./item.mjs"
 import { startPresenceHeartbeat, pokePresence, resetPresenceAccounting } from "./presence-heartbeat.mjs"
 import { logger } from "./logger.mjs"
 import { getBackendFs } from './platform-fs.mjs'
@@ -806,6 +806,9 @@ export async function initAutobase(newBaseKey, options = {}) {
             setPeerCount(swarm.connections.size)
             broadcastPeerCount()
             broadcastNetworkStatus()
+            // A peer is reachable again, which is precisely the condition a
+            // stalled writer was waiting for. Drain anything the outbox kept.
+            tryReplayOutbox()
             conn.on('close', () => {
                 if (grantChannel) {
                     _epochGrantChannels.delete(grantChannel)

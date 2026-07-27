@@ -205,6 +205,8 @@ export const IT_MESSAGES = {
     'main.notification.writeSyncStalled': 'Le modifiche non vengono salvate: nessun peer raggiungibile per la sincronizzazione.',
     'main.notification.writeBackendUnresponsive': 'Le modifiche non vengono salvate: il backend locale non risponde. Riavvia Listam per ripristinarlo.',
     'main.notification.writeStorageFenced': 'Le modifiche non vengono salvate — un’altra istanza di Listam ha preso il controllo di questa cartella dati. Riavvia Listam.',
+    'main.notification.writeQueued': 'Salvato su questo dispositivo — verrà sincronizzato quando un peer sarà raggiungibile.',
+    'main.notification.writeNeedsDecision': 'Alcune modifiche ti aspettano: sono state fatte prima che questa lista cambiasse, quindi non sono state inviate automaticamente.',
     'main.notification.undone': 'Annullato',
     'main.notification.nothingToUndo': 'Niente da annullare',
     'main.notification.undoConflict': 'Impossibile annullare: questo articolo è cambiato',

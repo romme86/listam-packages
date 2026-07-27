@@ -205,6 +205,8 @@ export const ES_MESSAGES = {
     'main.notification.writeSyncStalled': 'Los cambios no se guardan: este dispositivo no puede conectarse con ningun par para sincronizar.',
     'main.notification.writeBackendUnresponsive': 'Los cambios no se guardan: el backend local no responde. Reinicia Listam para recuperarlo.',
     'main.notification.writeStorageFenced': 'Los cambios no se están guardando: otra instancia de Listam ha tomado el control de esta carpeta de datos. Reinicia Listam.',
+    'main.notification.writeQueued': 'Guardado en este dispositivo: se sincronizará cuando haya un par accesible.',
+    'main.notification.writeNeedsDecision': 'Algunos cambios te esperan: se hicieron antes de que esta lista cambiara, así que no se enviaron automáticamente.',
     'main.notification.undone': 'Deshecho',
     'main.notification.nothingToUndo': 'Nada que deshacer',
     'main.notification.undoConflict': 'No se puede deshacer: ese elemento cambio',

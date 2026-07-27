@@ -205,6 +205,8 @@ export const PT_MESSAGES = {
     'main.notification.writeSyncStalled': 'As alterações não estão a ser guardadas — este dispositivo não consegue alcançar nenhum par para sincronizar.',
     'main.notification.writeBackendUnresponsive': 'As alterações não estão a ser guardadas — o backend local deixou de responder. Reinicie o Listam.',
     'main.notification.writeStorageFenced': 'As alterações não estão a ser guardadas — outra instância do Listam assumiu esta pasta de dados. Reinicie o Listam.',
+    'main.notification.writeQueued': 'Guardado neste dispositivo — será sincronizado quando houver um par acessível.',
+    'main.notification.writeNeedsDecision': 'Algumas alterações estão à sua espera: foram feitas antes de esta lista mudar, por isso não foram enviadas automaticamente.',
     'main.notification.undone': 'Anulado',
     'main.notification.nothingToUndo': 'Nada para anular',
     'main.notification.undoConflict': 'Não é possível anular — esse artigo mudou',

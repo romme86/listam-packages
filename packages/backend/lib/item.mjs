@@ -19,6 +19,20 @@ import { isInternalChannelItem } from './shared-creds.mjs'
 import { isPresenceItem } from '@listam/domain/presence'
 import { isFenced, fenceReason } from './fence.mjs'
 
+// The outbox is INJECTED, not imported: it needs the platform fs and the live
+// epoch/base state, and importing it here would close another import cycle.
+// backend.mjs constructs it and calls setOutbox once the storage root is known.
+let _outbox = null
+export function setOutbox (store) { _outbox = store ?? null }
+
+// Ask the outbox to drain. Safe to call often and from anywhere: it is a no-op
+// on an empty queue and refuses to run two passes at once. Called when a peer
+// connects, since that is exactly when a writer that could not flush recovers.
+export function tryReplayOutbox () {
+    if (!_outbox) return
+    Promise.resolve(_outbox.replay()).catch((e) => logger.log('[ERROR] outbox: replay failed:', e?.message ?? e))
+}
+
 // --- WRITE SERIALIZATION (prevents concurrent autobase.append / flush races) ---
 // One write chain PER BASE. The personal base uses the '__personal__' chain
 // (byte-identical to the old single global chain — rekey.mjs serializes its
@@ -137,15 +151,66 @@ function refuseFencedMutation (operationType) {
     return false
 }
 
-function refuseStalledMutation (operationType) {
+// The writer cannot flush. Before this, the mutation was simply dropped and the
+// user's edit disappeared.
+//
+// `queueable` (when given) lets the outbox keep it instead: a single list
+// operation that replay can re-append verbatim. Only offered for ADD / UPDATE /
+// DELETE on the PERSONAL base:
+//   - MOVE is a compound cross-list transaction (an update, or an add plus a
+//     delete). Replaying half of it is worse than refusing the whole thing.
+//   - a SHARED base's write needs its live ctx resolved at replay time, which
+//     this release does not do. Those still refuse exactly as before.
+// Either way the frontend is told, so nothing is ever silently lost.
+function refuseStalledMutation (operationType, queueable = null) {
     logger.log(`[WARNING] ${operationType} refused; local writer cannot flush (peers/DHT unreachable?)`)
+
+    let queued = false
+    if (_outbox && queueable?.op?.value?.id) {
+        try {
+            _outbox.queue({
+                id: String(queueable.op.value.id),
+                command: operationType,
+                payload: queueable.op,
+                listId: queueable.op.listId ?? null,
+                baseKey: null, // personal base only, per the note above
+            })
+            queued = true
+        } catch (e) {
+            logger.log('[ERROR] outbox: could not queue the refused mutation:', e?.message ?? e)
+        }
+    }
+
     try {
         const req = rpc.request(RPC_MESSAGE)
-        req.send(JSON.stringify({ type: 'sync-stalled', message: 'Cannot save changes: this device cannot reach any peer to sync with.' }))
+        req.send(JSON.stringify(queued
+            ? {
+                type: 'write-queued',
+                id: String(queueable.op.value.id),
+                listId: queueable.op.listId ?? null,
+                message: 'Saved on this device — it will sync when a peer is reachable.',
+            }
+            : { type: 'sync-stalled', message: 'Cannot save changes: this device cannot reach any peer to sync with.' }))
     } catch (e) {
-        logger.log('[ERROR] Failed to send sync-stalled message:', e)
+        logger.log('[ERROR] Failed to send write-refusal message:', e)
     }
     return false
+}
+
+// Re-append a queued operation. Deliberately the SAME path a live mutation
+// takes — same write chain, same fenced/flushable gates — so a replay can never
+// bypass a guard a fresh write would honour.
+export async function replayQueuedOperation (entry) {
+    const op = entry?.payload
+    if (!op || !op.value) return false
+    return enqueueWrite(async () => {
+        const v = ctxView(null)
+        if (!v.autobase || v.autobase.closing) return false
+        if (isFenced()) return false
+        if (!(await waitForFlushableWriter(v))) return false
+        await v.autobase.append(prepareListAppendOperation(op, v))
+        return true
+    }, null)
 }
 
 // An append can succeed at the writer-core level while apply() drops it because
@@ -287,7 +352,7 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
             return false
         }
         if (isFenced()) return refuseFencedMutation('ADD')
-        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('ADD')
+        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('ADD', v.shared ? null : { op })
         // Get length before append to verify it increases
         // const lengthBefore = v.autobase.local.length
 
@@ -348,7 +413,7 @@ export async function updateItem (item, ctx = null) {
             return false
         }
         if (isFenced()) return refuseFencedMutation('UPDATE')
-        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('UPDATE')
+        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('UPDATE', v.shared ? null : { op })
         const lengthBefore = v.autobase.local.length
 
         await v.autobase.append(prepareListAppendOperation(op, v))
@@ -398,7 +463,7 @@ export async function deleteItem (item, ctx = null) {
             return false
         }
         if (isFenced()) return refuseFencedMutation('DELETE')
-        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('DELETE')
+        if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('DELETE', v.shared ? null : { op })
         const lengthBefore = v.autobase.local.length
 
         await v.autobase.append(prepareListAppendOperation(op, v))

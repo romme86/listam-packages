@@ -205,6 +205,8 @@ export const EN_MESSAGES = {
     'main.notification.writeSyncStalled': 'Changes are not being saved — this device can’t reach any peer to sync with.',
     'main.notification.writeBackendUnresponsive': 'Changes are not being saved — the local backend stopped responding. Restart Listam to recover.',
     'main.notification.writeStorageFenced': 'Changes are not being saved — another Listam instance took over this data folder. Restart Listam.',
+    'main.notification.writeQueued': 'Saved on this device — it will sync when a peer is reachable.',
+    'main.notification.writeNeedsDecision': 'Some changes are waiting for you: they were made before this list changed, so they were not sent automatically.',
     'main.notification.undone': 'Undone',
     'main.notification.nothingToUndo': 'Nothing to undo',
     'main.notification.undoConflict': 'Can’t undo — that item changed',

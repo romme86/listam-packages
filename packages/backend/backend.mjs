@@ -33,7 +33,7 @@ import {
     RPC_JOIN_LIST
 } from '@listam/protocol'
 import b4a from 'b4a'
-import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain, setMutationHook} from './lib/item.mjs'
+import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain, setMutationHook, setOutbox, replayQueuedOperation} from './lib/item.mjs'
 import { stopPresenceHeartbeat, writeHeartbeat, notePresenceInteraction, noteObservedWriterActivity, pokePresence, setPresenceWritesEnabled } from './lib/presence-heartbeat.mjs'
 import {
     applyOperationToList,
@@ -45,6 +45,7 @@ import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, r
 import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { fence, clearFence } from './lib/fence.mjs'
+import { createOutboxStore } from './lib/outbox-store.mjs'
 import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } from './lib/secrets.mjs'
 import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.mjs'
 import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet, startScheduledBackups, stopScheduledBackups, scheduleState, setScheduleEnabled } from './lib/auto-backup.mjs'
@@ -111,6 +112,8 @@ let bootSecretsForControl = null
 let localWriterKeyFilePath = './local-writer-key.txt'
 let lockPath = './lista.lock'
 let storageLease = null
+// Durable queue of mutations the writer could not flush (see lib/outbox.mjs).
+let outbox = null
 let platformFs = null
 let shutdownStarted = false
 
@@ -352,6 +355,27 @@ export async function startBackend(platform) {
     // memory; the next scheduled beat carries it — no extra write). The heartbeat
     // itself is armed per-base by network.mjs's boot tail.
     setMutationHook(notePresenceInteraction)
+
+    // Durable outbox: a mutation the writer could not flush is kept here and
+    // replayed once it can, instead of being dropped. Constructed after the
+    // storage root is known, and injected into item.mjs rather than imported by
+    // it — see setOutbox for why.
+    outbox = createOutboxStore({
+        fs: platformFs,
+        storagePath,
+        replayEntry: replayQueuedOperation,
+        // The world an entry must still match to replay automatically.
+        currentEpoch: () => Number(membershipState?.currentEpoch) || null,
+        // Where this list's items live NOW. `undefined` (unknown list) means
+        // "unchanged" rather than blocking replay on a registry that has not
+        // loaded — see outbox.mjs.
+        baseKeyForList: (entry) => (entry?.listId ? (_listIdToBaseKey.get(entry.listId) ?? null) : undefined),
+        notify: notifyFrontend,
+    })
+    setOutbox(outbox)
+    // Anything queued by a previous run: try it now that the base is up. Errors
+    // are contained inside replay(); a stuck queue must never block boot.
+    outbox.replay().catch((e) => logger.log('[ERROR] outbox: boot replay failed:', e?.message ?? e))
 
     const disposeTeardown = platform.onTeardown?.(shutdownBackend)
     return { paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown }

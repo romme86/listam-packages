@@ -205,6 +205,8 @@ export const FR_MESSAGES = {
     'main.notification.writeSyncStalled': 'Les modifications ne sont pas enregistrées : aucun pair joignable pour se synchroniser.',
     'main.notification.writeBackendUnresponsive': 'Les modifications ne sont pas enregistrées : le backend local ne répond plus. Redémarrez Listam.',
     'main.notification.writeStorageFenced': 'Les modifications ne sont pas enregistrées — une autre instance de Listam a pris le contrôle de ce dossier de données. Redémarrez Listam.',
+    'main.notification.writeQueued': 'Enregistré sur cet appareil — la synchronisation se fera dès qu’un pair sera joignable.',
+    'main.notification.writeNeedsDecision': 'Des modifications vous attendent : faites avant que cette liste ne change, elles n’ont pas été envoyées automatiquement.',
     'main.notification.undone': 'Annulé',
     'main.notification.nothingToUndo': 'Rien à annuler',
     'main.notification.undoConflict': 'Annulation impossible : cet article a changé',

@@ -205,6 +205,8 @@ export const DE_MESSAGES = {
     'main.notification.writeSyncStalled': 'Änderungen werden nicht gespeichert – dieses Gerät erreicht keinen Peer zum Synchronisieren.',
     'main.notification.writeBackendUnresponsive': 'Änderungen werden nicht gespeichert – das lokale Backend antwortet nicht. Starten Sie Listam neu.',
     'main.notification.writeStorageFenced': 'Änderungen werden nicht gespeichert — eine andere Listam-Instanz hat diesen Datenordner übernommen. Starte Listam neu.',
+    'main.notification.writeQueued': 'Auf diesem Gerät gespeichert — wird synchronisiert, sobald ein Peer erreichbar ist.',
+    'main.notification.writeNeedsDecision': 'Einige Änderungen warten auf dich: Sie entstanden, bevor sich diese Liste geändert hat, und wurden daher nicht automatisch gesendet.',
     'main.notification.undone': 'Rückgängig gemacht',
     'main.notification.nothingToUndo': 'Nichts rückgängig zu machen',
     'main.notification.undoConflict': 'Rückgängig nicht möglich – dieser Artikel wurde geändert',
