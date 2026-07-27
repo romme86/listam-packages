@@ -10,6 +10,8 @@ import { rolloutEnabled, setRolloutFlag, resetRolloutFlags, rolloutFlags } from 
 const SHIPPED = {
     // Flipped 2026-07-27, one release after the code landed (dd6a169).
     rigorNotRetroactive: true,
+    // Ships off: writers must not start stamping until every peer reads stamps.
+    stampBoardConfigOnWrite: false,
 }
 
 test('the shipped flags are exactly what this test declares', () => {

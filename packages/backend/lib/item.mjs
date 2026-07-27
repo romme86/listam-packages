@@ -14,6 +14,7 @@ import {
 } from './list-reducer.mjs'
 import { createViewCheckpoint } from './view-checkpoint.mjs'
 import { isBoardType, applyStatusTransition, doneStatusesOf, validateTicketDraft } from './board.mjs'
+import { rolloutEnabled } from './rollout.mjs'
 import { buildMovedItem, isSameSurfaceMove } from './list-move.mjs'
 import { isInternalChannelItem } from './shared-creds.mjs'
 import { isPresenceItem } from '@listam/domain/presence'
@@ -334,6 +335,13 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
         Object.assign(item, pickTicketExtra(extra))
     }
     if (isBoardType(item.listType)) {
+        // Record which board-config this device had actually seen. apply uses it
+        // to judge the ticket by the rules the writer was under, rather than by
+        // whichever config happens to precede the add after linearization.
+        // Only the writer can know this; no timestamp comparison recovers it.
+        if (rolloutEnabled('stampBoardConfigOnWrite')) {
+            item.boardConfigSeq = Math.max(0, Number(v.boardConfigState?.highestSequence) || 0)
+        }
         item.status = typeof item.status === 'string' ? item.status : 'todo'
         item.isDone = item.status === 'done'
         if (typeof item.inProgressMs !== 'number') item.inProgressMs = 0

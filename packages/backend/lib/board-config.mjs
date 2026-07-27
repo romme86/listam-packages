@@ -38,6 +38,28 @@ export function cloneBoardConfigState(state) {
     }
 }
 
+// The config the writer of this item had actually seen, reconstructed from the
+// sequence it stamped.
+//
+// This is what makes the verdict order-independent in the case timestamps cannot
+// decide. A writer that had not seen the rigor-on config stamps a lower sequence,
+// and every record at or below that sequence is causally prior to the item — so
+// it precedes the item in EVERY linearization and is on every peer before the
+// item is evaluated. The answer therefore cannot depend on where a concurrent
+// config record lands.
+//
+// Returns null when there is no usable stamp, leaving the caller on its normal
+// path.
+export function configAsStamped(item, records, options = {}) {
+    const stamped = Number(item?.boardConfigSeq)
+    if (!Number.isSafeInteger(stamped) || stamped < 0) return null
+    if (!Array.isArray(records)) return null
+
+    // Sequence 0 means "no config record at all" — the writer was on the default.
+    const seen = records.filter((r) => Number(r?.sequence) <= stamped)
+    return reduceBoardConfigLog(seen, options)
+}
+
 // Does the rigor gate apply to this item?
 //
 // A config change must not retroactively invalidate data that was legal when it

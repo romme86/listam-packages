@@ -51,7 +51,7 @@ import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.m
 import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet, startScheduledBackups, stopScheduledBackups, scheduleState, setScheduleEnabled } from './lib/auto-backup.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
-import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence, rigorAppliesToItem } from './lib/board-config.mjs'
+import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence, rigorAppliesToItem, configAsStamped } from './lib/board-config.mjs'
 import { rolloutEnabled } from './lib/rollout.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
@@ -1671,6 +1671,12 @@ export async function apply (ctx, nodes, view, host) {
         ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
     }))
 
+    // Board-config records this pass can resolve a stamp against: everything in
+    // the committed view, plus anything accepted as the loop runs. A stamp only
+    // ever names a record causally PRIOR to the stamping op, so it is always one
+    // of these by the time the op is reached.
+    const seenBoardConfigRecords = [...boardConfigRecords]
+
     for (const node of nodes) {
         const { value } = node
         if (!value) continue
@@ -1751,6 +1757,7 @@ export async function apply (ctx, nodes, view, host) {
                 continue
             }
             await view.append({ op: 'board-config', record: value })
+            seenBoardConfigRecords.push(value)
             // Broadcast deferred to the end of the pass, for the same reason as
             // the roster: it is a snapshot of state this pass may still lose.
             continue
@@ -1807,20 +1814,31 @@ export async function apply (ctx, nodes, view, host) {
             // cluster-wide enforcement behind the frontend's create form — the
             // reduced config is deterministic across peers at this point in
             // linearized history, and the default config is rigor ON.
-            if (isBoardType(operation.value.listType) && ctx.boardConfigState?.config?.rigorOn) {
-                // Turning rigor on must not retroactively invalidate a ticket
-                // that was legal when it was written. That is also what makes
-                // this verdict order-independent: rigorAppliesToItem compares two
-                // fixed timestamps, so a peer that linearizes the config ahead of
-                // the add reaches the same answer as one that does not.
+            if (isBoardType(operation.value.listType)) {
+                // Judge the ticket by the rules its WRITER was under.
                 //
-                // CONSENSUS-GATED: while the flag is off, the gate behaves
-                // exactly as before. See lib/rollout.mjs for why this cannot flip
-                // in the same release that introduces it.
-                const retroactive = rolloutEnabled('rigorNotRetroactive')
-                    && !rigorAppliesToItem(operation.value, ctx.boardConfigState)
-                if (!retroactive) {
-                    const check = validateTicketDraft(operation.value, ctx.boardConfigState.config)
+                // Best: the writer stamped which config it had seen. Every record
+                // at or below that sequence is causally prior to the ticket, so it
+                // precedes it in every linearization — the verdict cannot depend
+                // on where a concurrent config record lands. No flag on the read
+                // side: it is inert until writers stamp.
+                //
+                // Otherwise fall back to timestamps (rigorNotRetroactive), which
+                // gets the common case right — a ticket written before rigor was
+                // turned on — but cannot tell a writer that had not YET seen the
+                // rigor-on config from one that had.
+                const stamped = configAsStamped(operation.value, seenBoardConfigRecords, {
+                    baseKey: ctx.autobase?.key,
+                    ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
+                })
+                const effective = stamped ?? ctx.boardConfigState
+                const gated = effective?.config?.rigorOn
+                    && (stamped
+                        ? true
+                        : !(rolloutEnabled('rigorNotRetroactive')
+                            && !rigorAppliesToItem(operation.value, effective)))
+                if (gated) {
+                    const check = validateTicketDraft(operation.value, effective.config)
                     if (!check.ok) {
                         logger.log('[WARNING] Dropped non-rigor board add (rigor mode on); missing:', check.missing)
                         continue

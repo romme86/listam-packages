@@ -267,6 +267,103 @@ test('SETTLED VERDICT: a ticket written AFTER rigor was turned on is still refus
         'a sparse ticket written before the transition must be admitted')
 })
 
+// The stamp closes what timestamps cannot.
+//
+// Same scenario as KNOWN RESIDUAL below — a writer whose clock is past the
+// transition but which had NOT seen the rigor-on config — except the ticket
+// records which config the writer had. The verdict then depends only on the op
+// and a causally-prior record, so both orders agree.
+test('STAMPED VERDICT: a ticket stamped with the config its writer had is admitted in BOTH orders', async (t) => {
+    const { ctx, forkPoint } = await ownedBase(t)
+    const turnedOnAt = Date.now()
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1, turnedOnAt - 1000) })
+    const rigorOn = boardConfigNode(ctx, true, 2, turnedOnAt)
+
+    // Writer had seen config seq 1 (rigor off) and nothing later. Its wall clock
+    // is past the transition, which is exactly what defeats the timestamp rule.
+    const ticket = sparseTicket('ticket-stamped', { timestamp: turnedOnAt + 1000, boardConfigSeq: 1 })
+    const addOp = boardAddOp(ctx, ticket)
+
+    for (const [name, nodes] of [['add first', [addOp, rigorOn]], ['config first', [rigorOn, addOp]]]) {
+        const pass = await runPass(ctx, nodes, forkPoint)
+        assert.equal(hasItemEntry(pass.appended, ticket.id), true,
+            `a ticket stamped under rigor-off must be admitted (${name})`)
+    }
+})
+
+test('STAMPED VERDICT: a ticket stamped with a rigor-ON config is refused', async (t) => {
+    // Non-vacuity: the stamp must not be a blanket bypass. A writer that HAD seen
+    // rigor-on is held to it — note the timestamp here PREDATES the transition,
+    // so the timestamp rule alone would have let this through.
+    //
+    // Only reachable orders are exercised. A stamp names a record the writer had
+    // already seen, which is therefore causally prior and precedes the ticket in
+    // EVERY linearization — "add before the config it claims to have seen" is not
+    // a history autobase can produce, so it is not a case to assert on.
+    const turnedOnAt = Date.now()
+    const ticket = () => sparseTicket('ticket-stamped-on', { timestamp: turnedOnAt - 5000, boardConfigSeq: 2 })
+
+    // Resolved from the committed view.
+    const committed = await ownedBase(t)
+    committed.forkPoint.push({ op: 'board-config', record: boardConfigNode(committed.ctx, false, 1, turnedOnAt - 1000) })
+    committed.forkPoint.push({ op: 'board-config', record: boardConfigNode(committed.ctx, true, 2, turnedOnAt) })
+    const fromView = await runPass(committed.ctx, [boardAddOp(committed.ctx, ticket())], committed.forkPoint)
+    assert.equal(hasItemEntry(fromView.appended, 'ticket-stamped-on'), false,
+        'a ticket stamped under rigor-on must be refused when the config is already committed')
+
+    // Resolved from a record accepted earlier in the SAME pass.
+    const sameBatch = await ownedBase(t)
+    sameBatch.forkPoint.push({ op: 'board-config', record: boardConfigNode(sameBatch.ctx, false, 1, turnedOnAt - 1000) })
+    const rigorOn = boardConfigNode(sameBatch.ctx, true, 2, turnedOnAt)
+    const inBatch = await runPass(sameBatch.ctx, [rigorOn, boardAddOp(sameBatch.ctx, ticket())], sameBatch.forkPoint)
+    assert.equal(hasItemEntry(inBatch.appended, 'ticket-stamped-on'), false,
+        'a ticket stamped under rigor-on must be refused when the config arrives in the same pass')
+})
+
+test('STAMPED VERDICT: a compliant ticket is admitted whatever it is stamped with', async (t) => {
+    const { ctx, forkPoint } = await ownedBase(t)
+    const rigorOn = boardConfigNode(ctx, true, 1, Date.now())
+    const ticket = rigorousTicket('ticket-stamped-good')
+    ticket.boardConfigSeq = 1
+    const pass = await runPass(ctx, [rigorOn, boardAddOp(ctx, ticket)], forkPoint)
+    assert.equal(hasItemEntry(pass.appended, ticket.id), true)
+})
+
+test('WRITE SIDE: addItem stamps the config it has seen, only when the flag is on', async (t) => {
+    const { ctx } = await ownedBase(t)
+    const complete = {
+        description: 'The trap leaks',
+        checklist: [{ text: 'Buy a new trap' }],
+        estimatedHours: 2,
+        estimatedComplexity: 20,
+    }
+
+    const stampOf = async (text) => {
+        const frames = []
+        setRpc({
+            request: (command) => ({
+                command,
+                send: (data) => {
+                    try { frames.push(JSON.parse(data)) } catch { /* non-item frame */ }
+                },
+            }),
+        })
+        assert.equal(await addItem(text, 'work', 'board', complete, ctx), true, 'the compliant add must be accepted')
+        await ctx.autobase.update()
+        setRpc(null)
+        const row = frames.find((f) => f?.text === text)
+        assert.ok(row, `the frontend must have been told about ${text}`)
+        return row.boardConfigSeq
+    }
+
+    assert.equal(await stampOf('unstamped'), undefined, 'nothing is stamped while the flag is off')
+
+    setRolloutFlag('stampBoardConfigOnWrite', true)
+    t.after(() => resetRolloutFlags())
+    // No board-config record on this base, so the writer is on the default: 0.
+    assert.equal(await stampOf('stamped'), 0, 'the seen config sequence is recorded')
+})
+
 // The part the timestamp rule does NOT close, stated rather than glossed.
 //
 // A peer that has not yet seen the rigor-on config writes a sparse ticket, so
@@ -278,7 +375,7 @@ test('SETTLED VERDICT: a ticket written AFTER rigor was turned on is still refus
 // Closing this needs the causal-past rule: "was the config in the op's causal
 // past" is intrinsic to the two records, where "is it in the prefix" is not.
 // Until then the announcement retraction makes it recoverable rather than silent.
-test('KNOWN RESIDUAL: a ticket written concurrently with the rigor-on config is still order-dependent', { todo: 'needs the causal-past rule; the timestamp rule cannot see that the writer had not seen the config' }, async (t) => {
+test('KNOWN RESIDUAL: a ticket written concurrently with the rigor-on config is still order-dependent', { todo: 'closed by the stamp (STAMPED VERDICT above); RED until stampBoardConfigOnWrite flips and writers stamp' }, async (t) => {
     setRolloutFlag('rigorNotRetroactive', true)
     t.after(() => resetRolloutFlags())
 

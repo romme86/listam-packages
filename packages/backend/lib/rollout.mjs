@@ -29,6 +29,20 @@ const FLAGS = {
     // peer is updated — that window is the cost of the flip, and it closes as the
     // last peer deploys.
     rigorNotRetroactive: true,
+
+    // Board adds carry `boardConfigSeq`: which board-config the writer had
+    // actually seen when it wrote the ticket. apply honours the stamp whenever
+    // one is present (no flag needed for that — it is inert until stamps exist),
+    // so this flag gates the WRITE side, which is the consensus-critical half.
+    //
+    // It closes what the timestamp rule cannot: a writer that had not yet seen
+    // the rigor-on config still has a wall clock past the transition, and no
+    // comparison of timestamps can tell that apart from a writer that had seen
+    // it. What the writer knew is only knowable to the writer.
+    //
+    // Flip only once every peer runs a build that reads the stamp; until then an
+    // older peer ignores it and applies its own rule to the same ticket.
+    stampBoardConfigOnWrite: false,
 }
 
 const flags = { ...FLAGS }
