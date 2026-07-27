@@ -352,6 +352,32 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
             return false
         }
         if (isFenced()) return refuseFencedMutation('ADD')
+
+        // Rigor gate, at WRITE time. apply() enforces this too, but there it can
+        // only `continue` — the append has already happened, addItem has already
+        // returned true, and nothing tells the client. The row simply never
+        // exists. Checking here turns a silent loss into a refusal the UI can act
+        // on, exactly as the MOVE path above already does (and for the same
+        // reason its comment gives).
+        //
+        // Note the default matters: a fresh base seeds the full default board
+        // config, and DEFAULT_BOARD_CONFIG has rigorOn true — so this is the
+        // ordinary path for a board add missing description / checklist /
+        // estimated hours / complexity, not an edge case behind a setting.
+        if (isBoardType(listType) && v.boardConfigState?.config?.rigorOn) {
+            const check = validateTicketDraft(item, v.boardConfigState.config)
+            if (!check || !check.ok) {
+                logger.log('[WARNING] ADD refused; board rigor gate unmet; missing:', check?.missing)
+                try {
+                    const req = rpc.request(RPC_MESSAGE)
+                    req.send(JSON.stringify({ type: 'add-rigor-missing', missing: check?.missing ?? [], item }))
+                } catch (e) {
+                    logger.log('[ERROR] Failed to send add-rigor-missing message:', e)
+                }
+                return false
+            }
+        }
+
         if (!(await waitForFlushableWriter(v))) return refuseStalledMutation('ADD', v.shared ? null : { op })
         // Get length before append to verify it increases
         // const lengthBefore = v.autobase.local.length

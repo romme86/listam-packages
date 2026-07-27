@@ -38,6 +38,7 @@ import {
 import { addItem, updateItem, deleteItem, clearWriteChain } from './item.mjs'
 import { createViewCheckpoint } from './view-checkpoint.mjs'
 import { setRpc } from './state.mjs'
+import { createBoardConfigRecord, nextBoardConfigSequence } from './board-config.mjs'
 
 setBackendFs(fs)
 
