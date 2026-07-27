@@ -12,6 +12,7 @@
 // (one per shared list). `baseId`: a stable id for the base (its discovery-key
 // hex), used as the storage namespace and the BaseManager map key.
 import { createViewCheckpoint } from './view-checkpoint.mjs'
+import { createAnnouncementLog } from './announce.mjs'
 
 export function createBaseContext ({ role = 'shared', baseId = null, baseKey = null } = {}) {
     return {
@@ -26,6 +27,9 @@ export function createBaseContext ({ role = 'shared', baseId = null, baseKey = n
         setCurrentList (v) { this.currentList = v },
         setEpochKey (v) { this.epochKey = v },
         applyMembershipCheckpoint: createViewCheckpoint(),
+        // What apply has told the frontend exists on THIS base, so a reorg can
+        // retract rows it announced on a timeline that lost.
+        announcementLog: createAnnouncementLog(),
         // Autobase does NOT re-run apply over history on reopen, so a shared
         // base's currentList must be rebuilt from the persisted view on open —
         // its own checkpoint (mirrors item.mjs's module-level one for personal).

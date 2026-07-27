@@ -47,6 +47,7 @@ import {
 } from './shared-base.mjs'
 import { addItem, clearWriteChain, prepareListAppendOperation } from './item.mjs'
 import { setRpc } from './state.mjs'
+import { RPC_DELETE_FROM_BACKEND } from '@listam/protocol'
 import { apply } from '../backend.mjs'
 import { createListOperation } from './list-reducer.mjs'
 import { createBoardConfigRecord } from './board-config.mjs'
@@ -505,7 +506,12 @@ async function partition (...ctxs) {
     }
 }
 
-test('END TO END: a real peer is told about a ticket that the merged history then drops', { timeout: 600_000, todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+// The whole scenario, run once and shared: two real writers, a deterministic
+// reorder, and a ticket one peer announced to its frontend before the merge
+// dropped it. The two tests below read different things from it — one asserts
+// the row should never have been dropped (that is 2.1), the other asserts that
+// since it WAS dropped, the frontend is told (that is this step).
+async function stageRealDiscard (t) {
     const testnet = await createTestnet(3)
     const dirs = []
     const open = []
@@ -584,6 +590,11 @@ test('END TO END: a real peer is told about a ticket that the merged history the
         (await rebuildFromView(ctxB)).some((i) => i.id === announced.id), true,
         'PRECONDITION: the ticket must be in the committed view before the merge',
     )
+    assert.equal(
+        frames.some((f) => f.command === RPC_DELETE_FROM_BACKEND && f.payload?.id === announced.id),
+        false,
+        'PRECONDITION: nothing has retracted the ticket yet',
+    )
 
     // Meanwhile the owner turns rigor back on.
     await ctxA.autobase.append(boardConfigNode(ctxA, true, 2))
@@ -597,11 +608,111 @@ test('END TO END: a real peer is told about a ticket that the merged history the
     assert.equal(ctxB.boardConfigState?.config?.rigorOn, true,
         'PRECONDITION: the joined peer must have merged the owner rigor-on config')
 
+    return { ctxB, announced, frames }
+}
+
+test('END TO END: a real peer is told about a ticket that the merged history then drops', { timeout: 600_000, todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+    const { ctxB, announced } = await stageRealDiscard(t)
+
     assert.equal(
         (await rebuildFromView(ctxB)).some((i) => i.id === announced.id),
         true,
         'APPLIED THEN DISCARDED, end to end: this peer told its frontend the ticket exists, then the merged ' +
-        'history reordered the rigor-on config ahead of the add and the ticket left the committed view. ' +
-        'Nothing un-emits the frame, so the UI keeps a row no peer holds.',
+        'history reordered the rigor-on config ahead of the add and the ticket left the committed view.',
     )
+})
+
+test('END TO END CONVERGENCE: the discarded row is retracted on a real base', { timeout: 600_000 }, async (t) => {
+    const { ctxB, announced, frames } = await stageRealDiscard(t)
+
+    // Non-vacuity: this test is only meaningful while the row really is dropped.
+    // If 2.1 lands and the verdict stops depending on order, the todo test above
+    // goes green and this one must be retired with it rather than left asserting
+    // a retraction that should no longer happen.
+    assert.equal(
+        (await rebuildFromView(ctxB)).some((i) => i.id === announced.id),
+        false,
+        'PRECONDITION: the merged history must still drop the row — otherwise there is nothing to retract',
+    )
+
+    const retraction = frames.find(
+        (f) => f.command === RPC_DELETE_FROM_BACKEND && f.payload?.id === announced.id,
+    )
+    assert.ok(retraction,
+        'the frontend must be told to drop the row that a real Autobase reorg discarded')
+    assert.equal(retraction.payload.listId, 'work', 'the retraction must carry the bucket the row was shown in')
+    assert.equal(retraction.payload.listType, 'board')
+    assert.equal(ctxB.announcementLog.has(announced.id), false,
+        'the retracted row must leave the log')
+})
+
+// ---------------------------------------------------------------------------
+// CONVERGENCE — the first repair, landed ahead of 2.1 proper.
+//
+// The verdict is still order-dependent (that is 2.1, and a consensus change that
+// needs a mesh-wide rollout). What is fixed here is the part that needs no
+// consensus agreement at all: the frontend no longer keeps a row the committed
+// view discarded. apply retracts what it announced on the timeline that lost.
+//
+// This is strictly additive — the normal per-op emission path is unchanged, so
+// frame ordering for the three clients is exactly what it was.
+// ---------------------------------------------------------------------------
+test('CONVERGENCE: a row announced on a discarded timeline is retracted after the reorg', async (t) => {
+    const { ctx, forkPoint } = await ownedBase(t)
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1) })
+
+    const ticket = sparseTicket('ticket-retract')
+    const addOp = boardAddOp(ctx, ticket)
+    const rigorOn = boardConfigNode(ctx, true, 2)
+
+    const first = await runPass(ctx, [addOp, rigorOn], forkPoint)
+    assert.equal(hasItemFrame(first.frames, ticket.id), true,
+        'PRECONDITION: the frontend must have been told the ticket exists')
+    assert.equal(ctx.announcementLog.has(ticket.id), true,
+        'PRECONDITION: the announcement must have been recorded')
+
+    // The reorg: same fork point, the config now ahead of the add. apply refuses
+    // the add, so the committed view has no such row.
+    const second = await runPass(ctx, [rigorOn, addOp], forkPoint)
+    assert.equal(hasItemEntry(second.appended, ticket.id), false,
+        'PRECONDITION: this pass must still refuse the add — otherwise there is nothing to retract')
+
+    const retraction = second.frames.find(
+        (f) => f.command === RPC_DELETE_FROM_BACKEND && f.payload?.id === ticket.id,
+    )
+    assert.ok(retraction,
+        'the frontend must be told to drop the row the reorg discarded')
+    assert.equal(retraction.payload.listId, 'work', 'the retraction must carry the bucket the row was shown in')
+    assert.equal(retraction.payload.listType, 'board')
+    assert.equal(ctx.announcementLog.has(ticket.id), false,
+        'the retracted row must leave the log, so it is not retracted twice')
+})
+
+test('CONVERGENCE: an ordinary pass with no reorg retracts nothing', async (t) => {
+    const { ctx, forkPoint } = await ownedBase(t)
+
+    // Non-vacuity for the test above: prove the retraction is driven by the
+    // reorg, not by every pass. Two rows are added across two passes that BUILD
+    // on each other (no truncation), and neither is retracted.
+    const first = item({ id: 'row-1', text: 'Milk', listId: 'default', listType: 'shopping' })
+    const firstOp = prepareListAppendOperation(
+        createListOperation('add', first, { listId: 'default', listType: 'shopping' }), ctx,
+    )
+    const pass1 = await runPass(ctx, [firstOp], forkPoint)
+    assert.equal(hasItemEntry(pass1.appended, first.id), true, 'PRECONDITION: the first row must be admitted')
+
+    const grown = [...forkPoint, ...pass1.appended]
+    const second = item({ id: 'row-2', text: 'Bread', listId: 'default', listType: 'shopping' })
+    const secondOp = prepareListAppendOperation(
+        createListOperation('add', second, { listId: 'default', listType: 'shopping' }), ctx,
+    )
+    const pass2 = await runPass(ctx, [secondOp], grown)
+    assert.equal(hasItemEntry(pass2.appended, second.id), true, 'PRECONDITION: the second row must be admitted')
+
+    assert.deepEqual(
+        pass2.frames.filter((f) => f.command === RPC_DELETE_FROM_BACKEND).map((f) => f.payload?.id),
+        [],
+        'a pass that appends to unchanged history must retract nothing',
+    )
+    assert.equal(ctx.announcementLog.has(first.id), true, 'the earlier row must still be announced')
 })

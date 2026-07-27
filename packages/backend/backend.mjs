@@ -54,6 +54,7 @@ import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, can
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
+import { createAnnouncementLog, committedItemIds } from './lib/announce.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { buildSyncListPayload } from './lib/sync-list-payload.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
@@ -893,8 +894,13 @@ function broadcastBoardConfig(ctx = primaryContext) {
 // (incrementally; full re-scan only after an actual reorg).
 const applyMembershipCheckpoint = createViewCheckpoint()
 
+// What apply has told the frontend exists on the personal base. Mirrors the
+// checkpoint above: per-context state that apply owns.
+const primaryAnnouncementLog = createAnnouncementLog()
+
 export function resetApplyMembershipCheckpoint() {
     applyMembershipCheckpoint.reset()
+    primaryAnnouncementLog.clear()
 }
 
 // The personal (primary) base's context: a thin ADAPTER over the single global
@@ -917,6 +923,7 @@ export const primaryContext = {
     get epochEncryptionKeyPair () { return epochEncryptionKeyPair },
     get ownerAuthorityKeyPair () { return ownerAuthorityKeyPair },
     applyMembershipCheckpoint,
+    announcementLog: primaryAnnouncementLog,
 }
 
 // Push an item op from apply() to the frontend. For the personal base this is
@@ -930,9 +937,53 @@ function pushFromBackend (ctx, command, item) {
             ? { ...item, baseKey: b4a.toString(ctx.baseKey, 'hex') }
             : item
         rpc.request(command).send(JSON.stringify(payload))
+        // Remember what the frontend has now been told, so a later reorg can
+        // retract anything Autobase discards. Recorded only after the send
+        // actually succeeded — a frame that never left is not an assertion.
+        if (command === RPC_DELETE_FROM_BACKEND) ctx.announcementLog?.forget(item?.id)
+        else ctx.announcementLog?.note(item)
     } catch (e) {
         logger.log('[ERROR] pushFromBackend failed:', e)
     }
+}
+
+// Retract every row apply announced that this linearization does not contain.
+// Runs at the end of every pass; in the ordinary case the committed view holds
+// everything announced and nothing is emitted.
+//
+// `readFailed` is the conservative guard: if any view entry could not be read,
+// the item set is incomplete and a "missing" row might simply be one we failed
+// to scan. A lingering phantom is a far smaller harm than deleting a row that
+// really exists, so in that case nothing is retracted.
+async function retractDiscardedAnnouncements (ctx, view, readFailed) {
+    const log = ctx.announcementLog
+    if (!log || log.size === 0) return
+    if (readFailed) {
+        logger.log('[WARNING] Skipped announcement retraction; the view could not be fully read')
+        return
+    }
+
+    // Resumes from where the top-of-apply scan stopped, so this reads only the
+    // entries this pass appended.
+    let tailReadFailed = false
+    const { allItems } = await ctx.applyMembershipCheckpoint.update(view, {
+        onError: () => { tailReadFailed = true },
+    })
+    if (tailReadFailed) {
+        logger.log('[WARNING] Skipped announcement retraction; the view could not be fully read')
+        return
+    }
+
+    const phantoms = log.phantoms(committedItemIds(allItems))
+    if (phantoms.length === 0) return
+
+    for (const payload of phantoms) {
+        log.forget(payload.id)
+        pushFromBackend(ctx, RPC_DELETE_FROM_BACKEND, payload)
+    }
+    logger.log('[WARNING] Retracted rows the frontend was told about but a reorg discarded', {
+        count: phantoms.length,
+    })
 }
 
 // ---- Single-list sharing: shared-base manager + registry-driven reconcile ----
@@ -1596,7 +1647,13 @@ export async function apply (ctx, nodes, view, host) {
     }
     logger.log('[INFO] Apply started')
 
-    const { membershipRecords, boardConfigRecords } = await ctx.applyMembershipCheckpoint.update(view)
+    // A read failure means the scan skipped entries, so the item set derived
+    // from it is incomplete. The reconciliation at the tail of this function
+    // must not act on an incomplete set — see retractDiscardedAnnouncements.
+    let viewReadFailed = false
+    const { membershipRecords, boardConfigRecords } = await ctx.applyMembershipCheckpoint.update(view, {
+        onError: () => { viewReadFailed = true },
+    })
     ctx.setMembershipState(reduceMembershipLog(membershipRecords, { baseKey: ctx.autobase?.key }))
     ctx.setBoardConfigState(reduceBoardConfigLog(boardConfigRecords, {
         baseKey: ctx.autobase?.key,
@@ -1799,6 +1856,24 @@ export async function apply (ctx, nodes, view, host) {
         // All other values are appended to the view (for future use)
         await view.append(operation)
     }
+
+    // The pass is done and the view now holds this linearization. Correct
+    // anything the frontend was told about that this linearization does not
+    // contain.
+    //
+    // Unconditional on purpose. The obvious optimization — only reconcile when
+    // the checkpoint reports it could not resume — does not work: the checkpoint
+    // never re-scans a pass's OWN appends, so when the reorg lands on the very
+    // next apply its scan position still matches the truncated view and the
+    // truncation goes undetected. Reconciling every pass needs no such signal,
+    // and costs nothing: the extra scan is incremental, so the same entries are
+    // read once either way, just earlier.
+    //
+    // KNOWN GAP, deliberate: this runs inside apply, so a truncation that leaves
+    // NO nodes to re-apply (and therefore never calls apply again) is not
+    // corrected. That needs an autobase 'update' hook on both the personal and
+    // shared wirings; it is not in this step.
+    await retractDiscardedAnnouncements(ctx, view, viewReadFailed)
 }
 
 function nodeWriterKeyHex(node) {
