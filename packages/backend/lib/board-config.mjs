@@ -21,6 +21,11 @@ export function createBoardConfigState() {
         highestSequence: 0,
         updatedAt: 0,
         config: normalizeBoardConfig(null), // defaults => rigor ON
+        // When the CURRENT run of rigor-on began. 0 means "since the beginning":
+        // the default config is rigor ON, so on a board that never turned it off
+        // every ticket has always been subject to the gate. null means rigor is
+        // off. See rigorAppliesToItem.
+        rigorOnSince: 0,
     }
 }
 
@@ -29,7 +34,30 @@ export function cloneBoardConfigState(state) {
         highestSequence: Number(state?.highestSequence) || 0,
         updatedAt: Number(state?.updatedAt) || 0,
         config: normalizeBoardConfig(state?.config),
+        rigorOnSince: state?.rigorOnSince === null ? null : (Number(state?.rigorOnSince) || 0),
     }
+}
+
+// Does the rigor gate apply to this item?
+//
+// A config change must not retroactively invalidate data that was legal when it
+// was written. Turning rigor ON stops NEW sparse tickets from being accepted; it
+// does not make existing ones droppable.
+//
+// This is also what makes the verdict order-independent, which is the point:
+// the answer is a pure function of the item's own creation stamp and the config
+// record's own createdAt. Neither depends on where the two land in the
+// linearization, so two peers that see them in opposite orders still agree.
+export function rigorAppliesToItem(item, state) {
+    if (!state?.config?.rigorOn) return false
+    const since = state.rigorOnSince
+    if (since === null || since === undefined) return false
+    // `timestamp` is the creation stamp and survives edits; `updatedAt` is the
+    // fallback for rows written before it was set. Both default to 0, which is
+    // "older than any transition" — and on a board that never left the default
+    // rigor-on config `since` is 0 too, so the gate still applies to everything.
+    const createdAt = Number(item?.timestamp) || Number(item?.updatedAt) || 0
+    return createdAt >= since
 }
 
 export function nextBoardConfigSequence(state) {
@@ -95,6 +123,16 @@ export function reduceBoardConfigOperation(record, state = createBoardConfigStat
     next.highestSequence = body.sequence
     next.updatedAt = body.createdAt
     next.config = normalizeBoardConfig(body.config)
+
+    // Record only the TRANSITION into rigor-on. A later record that leaves rigor
+    // on while changing something else must not move the boundary, or editing an
+    // unrelated field would retroactively invalidate tickets again.
+    const wasOn = !!current.config?.rigorOn
+    const nowOn = !!next.config?.rigorOn
+    if (!nowOn) next.rigorOnSince = null
+    else if (!wasOn) next.rigorOnSince = body.createdAt
+    else next.rigorOnSince = current.rigorOnSince
+
     return accepted(next)
 }
 

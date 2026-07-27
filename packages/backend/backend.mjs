@@ -51,7 +51,8 @@ import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.m
 import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet, startScheduledBackups, stopScheduledBackups, scheduleState, setScheduleEnabled } from './lib/auto-backup.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
-import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence } from './lib/board-config.mjs'
+import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence, rigorAppliesToItem } from './lib/board-config.mjs'
+import { rolloutEnabled } from './lib/rollout.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { createAnnouncementLog, committedItemIds } from './lib/announce.mjs'
@@ -1807,10 +1808,23 @@ export async function apply (ctx, nodes, view, host) {
             // reduced config is deterministic across peers at this point in
             // linearized history, and the default config is rigor ON.
             if (isBoardType(operation.value.listType) && ctx.boardConfigState?.config?.rigorOn) {
-                const check = validateTicketDraft(operation.value, ctx.boardConfigState.config)
-                if (!check.ok) {
-                    logger.log('[WARNING] Dropped non-rigor board add (rigor mode on); missing:', check.missing)
-                    continue
+                // Turning rigor on must not retroactively invalidate a ticket
+                // that was legal when it was written. That is also what makes
+                // this verdict order-independent: rigorAppliesToItem compares two
+                // fixed timestamps, so a peer that linearizes the config ahead of
+                // the add reaches the same answer as one that does not.
+                //
+                // CONSENSUS-GATED: while the flag is off, the gate behaves
+                // exactly as before. See lib/rollout.mjs for why this cannot flip
+                // in the same release that introduces it.
+                const retroactive = rolloutEnabled('rigorNotRetroactive')
+                    && !rigorAppliesToItem(operation.value, ctx.boardConfigState)
+                if (!retroactive) {
+                    const check = validateTicketDraft(operation.value, ctx.boardConfigState.config)
+                    if (!check.ok) {
+                        logger.log('[WARNING] Dropped non-rigor board add (rigor mode on); missing:', check.missing)
+                        continue
+                    }
                 }
             }
             logger.log('[INFO] Applying add operation for item:', operation.value)

@@ -60,6 +60,7 @@ import {
 } from './shared-base.mjs'
 import { addItem, clearWriteChain, prepareListAppendOperation } from './item.mjs'
 import { setRpc } from './state.mjs'
+import { setRolloutFlag, resetRolloutFlags } from './rollout.mjs'
 import { RPC_DELETE_FROM_BACKEND } from '@listam/protocol'
 import { apply } from '../backend.mjs'
 import { createListOperation } from './list-reducer.mjs'
@@ -190,14 +191,17 @@ async function ownedBase (t) {
 // branch first ([add, config]); after the merge Autobase may order the owner's
 // config op first ([config, add]).
 // ---------------------------------------------------------------------------
-const boardConfigNode = (ctx, rigorOn, sequence) => createBoardConfigRecord({
+const boardConfigNode = (ctx, rigorOn, sequence, createdAt = Date.now()) => createBoardConfigRecord({
     ownerAuthorityKeyPair: ctx.ownerAuthorityKeyPair,
     baseKey: ctx.autobase.key,
     config: { rigorOn },
     sequence,
+    createdAt,
 })
 
-const sparseTicket = (id) => item({ id, text: 'Fix the sink', listId: 'work', listType: 'board', status: 'todo' })
+const sparseTicket = (id, extra = {}) => item({
+    id, text: 'Fix the sink', listId: 'work', listType: 'board', status: 'todo', ...extra,
+})
 const rigorousTicket = (id) => item({
     id,
     text: 'Fix the sink',
@@ -216,34 +220,96 @@ function boardAddOp (ctx, ticket) {
     return prepareListAppendOperation(op, ctx)
 }
 
-test('DISCARD: a board add admitted under rigor-off is refused when the rigor-on config reorders ahead of it', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+// With the rollout flag ON — the behaviour a later release enables once the mesh
+// is known to understand it. The verdict becomes a pure function of two fixed
+// timestamps, so it no longer depends on where the config lands relative to the
+// add. This is the executable definition of done for candidate 3.
+test('SETTLED VERDICT: a ticket written before rigor was turned on is admitted in BOTH orders', async (t) => {
+    setRolloutFlag('rigorNotRetroactive', true)
+    t.after(() => resetRolloutFlags())
+
     const { ctx, forkPoint } = await ownedBase(t)
-
-    // The base has been running with rigor OFF (committed, before the fork).
-    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1) })
-
-    const ticket = sparseTicket('ticket-reorder')
+    const writtenAt = Date.now()
+    // Rigor was off when the ticket was written, and turned on a second later.
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1, writtenAt - 1000) })
+    const ticket = sparseTicket('ticket-settled', { timestamp: writtenAt })
     const addOp = boardAddOp(ctx, ticket)
-    const rigorOn = boardConfigNode(ctx, true, 2)
+    const rigorOn = boardConfigNode(ctx, true, 2, writtenAt + 1000)
 
-    const first = await runPass(ctx, [addOp, rigorOn], forkPoint)
-    // Non-vacuity: unless the add really was admitted here, the reorder below
-    // proves nothing.
-    assert.equal(hasItemEntry(first.appended, ticket.id), true,
-        'PRECONDITION: the add must be admitted while rigor is off')
-    assert.equal(hasItemFrame(first.frames, ticket.id), true,
-        'PRECONDITION: the frontend must have been told about the add')
+    for (const [name, nodes] of [['add first', [addOp, rigorOn]], ['config first', [rigorOn, addOp]]]) {
+        const pass = await runPass(ctx, nodes, forkPoint)
+        assert.equal(hasItemEntry(pass.appended, ticket.id), true,
+            `a ticket that was legal when written must survive this linearization (${name})`)
+    }
+})
 
-    const second = await runPass(ctx, [rigorOn, addOp], forkPoint)
-    assert.equal(second.appended.some((e) => e?.op === 'board-config'), true,
-        'PRECONDITION: the rigor-on config must be accepted in the reordered pass')
+test('SETTLED VERDICT: a ticket written AFTER rigor was turned on is still refused', async (t) => {
+    // Non-vacuity for the test above: the flag makes the gate non-retroactive,
+    // it does not switch the gate off. Without this, "admitted in both orders"
+    // could just mean rigor stopped being enforced at all.
+    //
+    // Both config records are COMMITTED here, so there is no ordering variable —
+    // this measures enforcement, not order-independence.
+    setRolloutFlag('rigorNotRetroactive', true)
+    t.after(() => resetRolloutFlags())
 
+    const { ctx, forkPoint } = await ownedBase(t)
+    const turnedOnAt = Date.now()
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1, turnedOnAt - 1000) })
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, true, 2, turnedOnAt) })
+
+    const after = sparseTicket('ticket-after-rigor', { timestamp: turnedOnAt + 1000 })
+    assert.equal(hasItemEntry((await runPass(ctx, [boardAddOp(ctx, after)], forkPoint)).appended, after.id), false,
+        'a sparse ticket written under rigor-on must still be refused')
+
+    const before = sparseTicket('ticket-before-rigor', { timestamp: turnedOnAt - 500 })
+    assert.equal(hasItemEntry((await runPass(ctx, [boardAddOp(ctx, before)], forkPoint)).appended, before.id), true,
+        'a sparse ticket written before the transition must be admitted')
+})
+
+// The part the timestamp rule does NOT close, stated rather than glossed.
+//
+// A peer that has not yet seen the rigor-on config writes a sparse ticket, so
+// its wall-clock stamp lands AFTER the transition even though the writer could
+// not have known. Whether the gate fires then still depends on whether the
+// config is in the prefix when the add is evaluated — which differs by
+// linearization AND by how autobase happens to batch the nodes.
+//
+// Closing this needs the causal-past rule: "was the config in the op's causal
+// past" is intrinsic to the two records, where "is it in the prefix" is not.
+// Until then the announcement retraction makes it recoverable rather than silent.
+test('KNOWN RESIDUAL: a ticket written concurrently with the rigor-on config is still order-dependent', { todo: 'needs the causal-past rule; the timestamp rule cannot see that the writer had not seen the config' }, async (t) => {
+    setRolloutFlag('rigorNotRetroactive', true)
+    t.after(() => resetRolloutFlags())
+
+    const { ctx, forkPoint } = await ownedBase(t)
+    const turnedOnAt = Date.now()
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1, turnedOnAt - 1000) })
+    const rigorOn = boardConfigNode(ctx, true, 2, turnedOnAt)
+    // Written by a peer that had not seen `rigorOn`, but whose clock is past it.
+    const ticket = sparseTicket('ticket-concurrent', { timestamp: turnedOnAt + 1000 })
+    const addOp = boardAddOp(ctx, ticket)
+
+    const addFirst = await runPass(ctx, [addOp, rigorOn], forkPoint)
+    const configFirst = await runPass(ctx, [rigorOn, addOp], forkPoint)
     assert.equal(
-        hasItemEntry(second.appended, ticket.id),
-        true,
-        'APPLIED THEN DISCARDED: apply admitted this add in one linearization and refused it in another. ' +
-        'The frontend was told the item exists; the committed view does not contain it, and nothing un-emits the frame.',
+        hasItemEntry(addFirst.appended, ticket.id),
+        hasItemEntry(configFirst.appended, ticket.id),
+        'the verdict must not depend on where the concurrent config lands',
     )
+})
+
+test('SETTLED VERDICT: the gate still applies to everything on a board that never left the default', async (t) => {
+    // rigorOnSince is 0 on the default config, so "created at or after the
+    // transition" is true for every ticket — a fresh board keeps enforcing.
+    setRolloutFlag('rigorNotRetroactive', true)
+    t.after(() => resetRolloutFlags())
+
+    const { ctx, forkPoint } = await ownedBase(t)
+    const ticket = sparseTicket('ticket-default-board', { timestamp: Date.now() })
+    const pass = await runPass(ctx, [boardAddOp(ctx, ticket)], forkPoint)
+    assert.equal(hasItemEntry(pass.appended, ticket.id), false,
+        'a board that never turned rigor off must gate every ticket')
 })
 
 test('CONTROL: order is the only thing that changes the verdict', async (t) => {
@@ -656,14 +722,28 @@ async function stageRealDiscard (t) {
     return { ctxB, announced, frames }
 }
 
-test('END TO END: a real peer is told about a ticket that the merged history then drops', { timeout: 600_000, todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
-    const { ctxB, announced } = await stageRealDiscard(t)
+test('END TO END SETTLED VERDICT: with the flag on, the merged history keeps the ticket', { timeout: 600_000 }, async (t) => {
+    setRolloutFlag('rigorNotRetroactive', true)
+    t.after(() => resetRolloutFlags())
+
+    const { ctxB, announced, frames } = await stageRealDiscard(t)
 
     assert.equal(
         (await rebuildFromView(ctxB)).some((i) => i.id === announced.id),
         true,
-        'APPLIED THEN DISCARDED, end to end: this peer told its frontend the ticket exists, then the merged ' +
-        'history reordered the rigor-on config ahead of the add and the ticket left the committed view.',
+        'the ticket was legal when written, so a merge that reorders the rigor-on config ahead of it must keep it',
+    )
+    // The frontend may still see churn while a multi-pass re-apply is in flight:
+    // an intermediate pass can end with the row not yet re-admitted, which the
+    // retraction reads as a phantom and withdraws before a later pass restores
+    // it. Cosmetic, and it converges — what must hold is that the LAST thing the
+    // frontend was told about this row is not "it is gone".
+    const lastForRow = frames.filter((f) => f.payload?.id === announced.id).pop()
+    assert.ok(lastForRow, 'the frontend must have been told something about the row')
+    assert.notEqual(
+        lastForRow.command,
+        RPC_DELETE_FROM_BACKEND,
+        'the frontend must converge on the row existing, since the committed view has it',
     )
 })
 
