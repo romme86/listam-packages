@@ -1,0 +1,607 @@
+// Release 2.1, second harness: does `apply` ever APPLY an operation and then
+// DISCARD it when Autobase re-linearizes?
+//
+// apply-reorder.test.mjs answers a different question — whether apply's
+// ACCUMULATED list diverges from a rebuild of the committed view — and it is
+// green, because `applyOperationToList` is id-keyed LWW and therefore
+// order-insensitive. That mitigation is real, and it is why the projection
+// invariant cannot see the residual risk.
+//
+// The residual risk is per-operation, not per-list: an op that apply admits in
+// one linearization and REFUSES in another. Every refusal in apply is a bare
+// `continue` — but by then the op may already have produced a view entry and,
+// worse, an RPC frame the frontend has consumed. Autobase undoes the view. It
+// does not un-emit a frame, un-call `host.removeWriter`, or un-delete a key
+// file.
+//
+// So the invariant here is not about state, it is about DECISIONS:
+//
+//     for a fixed set of nodes, apply's admit/refuse decision for each op must
+//     not depend on the order the nodes are presented in.
+//
+// That is testable directly and deterministically. Autobase's documented
+// behaviour is to truncate the view back to the fork point and re-run apply
+// over the reordered nodes; these tests do exactly that, with a view we control,
+// so the reorder is staged rather than raced. Each test states the real-world
+// concurrency that produces its two orders.
+//
+// These tests are RED while the defect stands. That is the point: they are the
+// executable definition of "done" for 2.1.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import crypto from 'hypercore-crypto'
+import b4a from 'b4a'
+import createTestnet from 'hyperdht/testnet.js'
+import { setBackendFs } from './platform-fs.mjs'
+import { createBaseContext } from './base-context.mjs'
+import {
+    openSharedBase,
+    closeSharedBase,
+    bootstrapSharedOwner,
+    setupSharedPairing,
+    createSharedInvite,
+    joinSharedBaseViaInvite,
+} from './shared-base.mjs'
+import { addItem, clearWriteChain, prepareListAppendOperation } from './item.mjs'
+import { setRpc } from './state.mjs'
+import { apply } from '../backend.mjs'
+import { createListOperation } from './list-reducer.mjs'
+import { createBoardConfigRecord } from './board-config.mjs'
+import { createViewCheckpoint } from './view-checkpoint.mjs'
+import {
+    createAddWriterMembershipRecord,
+    createRemoveWriterMembershipRecord,
+    nextMembershipSequence,
+} from './membership.mjs'
+import {
+    createEpochEncryptionKeyPair,
+    createEpochGrants,
+    epochPublicKeyHex,
+    generateEpochKey,
+} from './key-epochs.mjs'
+
+setBackendFs(fs)
+
+function mkdir () {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'listam-discard-'))
+}
+
+// Items must satisfy normalizeListItem or createListOperation returns null and
+// the whole test would run against an empty operation. (It did, in an earlier
+// draft: the "encrypted" op was JSON `null`, every pass refused it, and the
+// control passed for exactly the wrong reason.)
+function item (fields) {
+    return { isDone: false, timeOfCompletion: 0, updatedAt: Date.now(), ...fields }
+}
+
+// A view we own, with the two operations Autobase performs on the real one:
+// append (during apply) and truncate-to-fork-point (before a re-apply).
+function makeView (seed = []) {
+    const entries = [...seed]
+    return {
+        entries,
+        get length () { return entries.length },
+        async get (i) { return entries[i] },
+        async append (entry) { entries.push(entry) },
+    }
+}
+
+async function snapshotView (view) {
+    const out = []
+    for (let i = 0; i < view.length; i++) out.push(await view.get(i))
+    return out
+}
+
+// Ground truth: a from-scratch reduction of the COMMITTED view, sharing no
+// state with anything apply has been mutating.
+//
+// `allItems()`, not `items()`: the latter is the DEFAULT bucket only, and every
+// item here lives in a named list. Asserting a board ticket's fate against the
+// default bucket is the trap that made an earlier round of this work read a
+// re-bucketed item as a deleted one.
+async function rebuildFromView (ctx) {
+    const checkpoint = createViewCheckpoint()
+    const { allItems } = await checkpoint.update(ctx.autobase.view, { onError: () => {} })
+    return allItems
+}
+
+// One apply pass over `nodes`, against a view truncated back to `forkPoint`.
+// Returns everything a rollback would have to undo: the view entries apply
+// appended, the RPC frames it emitted, and the consensus-layer calls it made.
+async function runPass (ctx, nodes, forkPoint) {
+    const frames = []
+    setRpc({
+        request: (command) => ({
+            command,
+            send: (data) => {
+                let payload = null
+                try { payload = JSON.parse(data) } catch { payload = data }
+                frames.push({ command, payload })
+            },
+        }),
+    })
+    const view = makeView(forkPoint)
+    const hostCalls = []
+    const host = {
+        addWriter: async (key) => { hostCalls.push({ fn: 'addWriter', key: key.toString('hex') }) },
+        removeWriter: async (key) => { hostCalls.push({ fn: 'removeWriter', key: key.toString('hex') }) },
+        removeable: () => true,
+    }
+    await apply(ctx, nodes.map((value) => ({ value })), view, host)
+    setRpc(null)
+    return {
+        appended: view.entries.slice(forkPoint.length),
+        frames,
+        hostCalls,
+    }
+}
+
+const hasItemEntry = (appended, id) => appended.some((e) => e?.item?.id === id || e?.id === id)
+const hasItemFrame = (frames, id) => frames.some((f) => f.payload?.id === id)
+const membershipSequences = (appended) => appended
+    .filter((e) => e?.op === 'membership')
+    .map((e) => e.record?.sequence)
+
+async function ownedBase (t) {
+    const ctx = createBaseContext({ role: 'shared' })
+    const dir = mkdir()
+    await openSharedBase(ctx, { storageDir: dir, joinSwarm: false })
+    await bootstrapSharedOwner(ctx)
+    await ctx.autobase.update()
+    t.after(async () => {
+        setRpc(null)
+        await closeSharedBase(ctx)
+        fs.rmSync(dir, { recursive: true, force: true })
+    })
+    // The committed prefix both passes fork from: whatever real apply already
+    // wrote for the bootstrap (the persisted membership record), so
+    // membershipState — and the owner-authority check every signed record is
+    // verified against — rebuilds exactly as it does in production.
+    return { ctx, forkPoint: await snapshotView(ctx.autobase.view) }
+}
+
+// ---------------------------------------------------------------------------
+// CANDIDATE 3 — a rigorOn false -> true transition on a base that had been
+// running with rigor OFF.
+//
+// Reachable with two ordinary writers, no fork and no exotic state: the owner
+// flips rigor back on while a second writer, partitioned, adds a board ticket
+// that was legal under rigor-off (the write-time gate in addItem reads the same
+// rigor flag, so it lets the ticket through). The second writer applies its own
+// branch first ([add, config]); after the merge Autobase may order the owner's
+// config op first ([config, add]).
+// ---------------------------------------------------------------------------
+const boardConfigNode = (ctx, rigorOn, sequence) => createBoardConfigRecord({
+    ownerAuthorityKeyPair: ctx.ownerAuthorityKeyPair,
+    baseKey: ctx.autobase.key,
+    config: { rigorOn },
+    sequence,
+})
+
+const sparseTicket = (id) => item({ id, text: 'Fix the sink', listId: 'work', listType: 'board', status: 'todo' })
+const rigorousTicket = (id) => item({
+    id,
+    text: 'Fix the sink',
+    listId: 'work',
+    listType: 'board',
+    status: 'todo',
+    description: 'The trap leaks',
+    checklist: [{ text: 'Buy a new trap' }],
+    estimatedHours: 2,
+    estimatedComplexity: 20,
+})
+
+function boardAddOp (ctx, ticket) {
+    const op = createListOperation('add', ticket, { listId: 'work', listType: 'board' })
+    assert.ok(op, 'PRECONDITION: the ticket must survive normalizeListItem')
+    return prepareListAppendOperation(op, ctx)
+}
+
+test('DISCARD: a board add admitted under rigor-off is refused when the rigor-on config reorders ahead of it', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+    const { ctx, forkPoint } = await ownedBase(t)
+
+    // The base has been running with rigor OFF (committed, before the fork).
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1) })
+
+    const ticket = sparseTicket('ticket-reorder')
+    const addOp = boardAddOp(ctx, ticket)
+    const rigorOn = boardConfigNode(ctx, true, 2)
+
+    const first = await runPass(ctx, [addOp, rigorOn], forkPoint)
+    // Non-vacuity: unless the add really was admitted here, the reorder below
+    // proves nothing.
+    assert.equal(hasItemEntry(first.appended, ticket.id), true,
+        'PRECONDITION: the add must be admitted while rigor is off')
+    assert.equal(hasItemFrame(first.frames, ticket.id), true,
+        'PRECONDITION: the frontend must have been told about the add')
+
+    const second = await runPass(ctx, [rigorOn, addOp], forkPoint)
+    assert.equal(second.appended.some((e) => e?.op === 'board-config'), true,
+        'PRECONDITION: the rigor-on config must be accepted in the reordered pass')
+
+    assert.equal(
+        hasItemEntry(second.appended, ticket.id),
+        true,
+        'APPLIED THEN DISCARDED: apply admitted this add in one linearization and refused it in another. ' +
+        'The frontend was told the item exists; the committed view does not contain it, and nothing un-emits the frame.',
+    )
+})
+
+test('CONTROL: order is the only thing that changes the verdict', async (t) => {
+    const { ctx, forkPoint } = await ownedBase(t)
+    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1) })
+    const rigorOn = boardConfigNode(ctx, true, 2)
+
+    // A rigor-COMPLIANT ticket is admitted in both orders. Without this the
+    // suite could not tell "the reorder refused it" from "board adds never get
+    // through this harness at all".
+    const good = rigorousTicket('ticket-compliant')
+    const goodOp = boardAddOp(ctx, good)
+    assert.equal(hasItemEntry((await runPass(ctx, [goodOp, rigorOn], forkPoint)).appended, good.id), true,
+        'a compliant ticket must be admitted with the add first')
+    assert.equal(hasItemEntry((await runPass(ctx, [rigorOn, goodOp], forkPoint)).appended, good.id), true,
+        'a compliant ticket must be admitted with the config first')
+
+    // A sparse ticket on a base that never left rigor-on is refused in both
+    // orders — the verdict is stable when the rigor flag does not move.
+    const alwaysOn = await ownedBase(t)
+    const bad = sparseTicket('ticket-always-rigor')
+    const badOp = boardAddOp(alwaysOn.ctx, bad)
+    const stillOn = boardConfigNode(alwaysOn.ctx, true, 1)
+    assert.equal(hasItemEntry((await runPass(alwaysOn.ctx, [badOp, stillOn], alwaysOn.forkPoint)).appended, bad.id), false)
+    assert.equal(hasItemEntry((await runPass(alwaysOn.ctx, [stillOn, badOp], alwaysOn.forkPoint)).appended, bad.id), false)
+})
+
+// ---------------------------------------------------------------------------
+// CANDIDATE 2 — an epoch-key mismatch mid-history.
+//
+// `unwrapListOperation` refuses any encrypted op whose epoch tag is not the
+// CURRENT epoch, and the current epoch advances inside the node loop when a
+// re-key (remove-writer) record is reduced. So the same op is decryptable or
+// not depending on which side of the re-key it lands on.
+//
+// Reachable with two ordinary writers: the owner removes a member (rotating the
+// epoch) while another writer, partitioned, keeps writing at the old epoch.
+// ---------------------------------------------------------------------------
+async function baseWithSecondWriter (t) {
+    const { ctx, forkPoint } = await ownedBase(t)
+
+    // A second writer, so a removal has someone to remove and the re-key has a
+    // grant set to satisfy.
+    const other = crypto.keyPair()
+    const addWriter = createAddWriterMembershipRecord({
+        ownerAuthorityKeyPair: ctx.ownerAuthorityKeyPair,
+        writerKey: other.publicKey,
+        baseKey: ctx.autobase.key,
+        sequence: nextMembershipSequence(ctx.membershipState),
+        epochPublicKey: epochPublicKeyHex(createEpochEncryptionKeyPair()),
+    })
+    const seeded = await runPass(ctx, [addWriter], forkPoint)
+    assert.equal(seeded.appended.some((e) => e?.op === 'membership'), true,
+        'PRECONDITION: the second writer must be admitted')
+    forkPoint.push(...seeded.appended)
+
+    return { ctx, forkPoint, other }
+}
+
+// A re-key (remove-writer) record removing `victim`, granting the new epoch key
+// to the owner, who is the only writer left afterwards.
+function rekeyRecord (ctx, { victim, sequence }) {
+    const epochKey = generateEpochKey()
+    const currentEpoch = Number(ctx.membershipState.currentEpoch) || 1
+    return createRemoveWriterMembershipRecord({
+        ownerAuthorityKeyPair: ctx.ownerAuthorityKeyPair,
+        writerKey: victim,
+        baseKey: ctx.autobase.key,
+        sequence,
+        previousEpoch: currentEpoch,
+        epoch: currentEpoch + 1,
+        epochKey,
+        epochGrants: createEpochGrants({
+            epochKey,
+            recipients: [{
+                writerKey: ctx.autobase.local.key.toString('hex'),
+                epochPublicKey: epochPublicKeyHex(ctx.epochEncryptionKeyPair),
+            }],
+        }),
+    })
+}
+
+test('DISCARD: a list op admitted at the current epoch is refused when the re-key reorders ahead of it', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+    const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
+
+    // An ordinary item, encrypted and tagged with the epoch live at write time.
+    const row = item({ id: 'item-epoch', text: 'Milk', listId: 'default', listType: 'shopping' })
+    const listOp = createListOperation('add', row, { listId: 'default', listType: 'shopping' })
+    const addOp = prepareListAppendOperation(listOp, ctx)
+    assert.equal(Number(addOp.epoch) > 0, true, 'PRECONDITION: the op must be epoch-tagged (encryption active)')
+
+    const rekey = rekeyRecord(ctx, { victim: other.publicKey, sequence: nextMembershipSequence(ctx.membershipState) })
+
+    // Accepting a re-key also rewrites ctx.epochKey (adoptGrantedEpochKey) and
+    // that mutation is NOT rolled back — a leak in its own right, asserted
+    // separately below. Restore it between passes so this test isolates the
+    // ordering effect rather than measuring the leak twice.
+    const epochKeyBefore = Buffer.from(ctx.epochKey)
+
+    const first = await runPass(ctx, [addOp, rekey], forkPoint)
+    assert.equal(hasItemEntry(first.appended, row.id), true,
+        'PRECONDITION: the add must be admitted at the epoch it was written under')
+    assert.equal(hasItemFrame(first.frames, row.id), true,
+        'PRECONDITION: the frontend must have been told about the add')
+    assert.equal(first.hostCalls.some((c) => c.fn === 'removeWriter'), true,
+        'PRECONDITION: the re-key must actually have removed the writer')
+
+    ctx.setEpochKey(epochKeyBefore)
+    const second = await runPass(ctx, [rekey, addOp], forkPoint)
+    assert.equal(
+        hasItemEntry(second.appended, row.id),
+        true,
+        'APPLIED THEN DISCARDED: the same add is admitted before the re-key and refused after it. ' +
+        'The frontend already has the row; the committed view does not.',
+    )
+})
+
+test('LEAKED SIDE EFFECT: a rolled-back re-key still leaves its epoch key installed on the context', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+    const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
+    const rekey = rekeyRecord(ctx, { victim: other.publicKey, sequence: nextMembershipSequence(ctx.membershipState) })
+    const before = Buffer.from(ctx.epochKey)
+
+    // Pass 1 accepts the re-key. Pass 2 is the same fork point with the re-key
+    // rolled back out of history entirely — the branch that carried it lost.
+    const accepted = await runPass(ctx, [rekey], forkPoint)
+    assert.equal(accepted.hostCalls.some((c) => c.fn === 'removeWriter'), true,
+        'PRECONDITION: the re-key must have been accepted')
+    assert.equal(before.equals(Buffer.from(ctx.epochKey)), false,
+        'PRECONDITION: accepting the re-key must have installed the new epoch key')
+
+    await runPass(ctx, [], forkPoint)
+    assert.equal(
+        before.equals(Buffer.from(ctx.epochKey)),
+        true,
+        'apply installed an epoch key from a record that is no longer in the committed view, and the rollback did not remove it',
+    )
+})
+
+// ---------------------------------------------------------------------------
+// CANDIDATE 1 — writer removal at consensus.
+//
+// This is the one whose side effects are irreversible OUTSIDE the view:
+// `host.removeWriter` mutates the Autobase writer set, and when the removed
+// writer is this device apply also calls `deleteEpochKey()` — a file unlink.
+// Neither is undone if the record is later refused.
+//
+// Reachability is narrower than the other two: every membership record carries
+// the owner's signature and a monotonic sequence, so two competing membership
+// records require the OWNER's writer to fork (restore-from-backup, or the same
+// writer key opened from two stores). That precondition is stated here rather
+// than assumed away.
+// ---------------------------------------------------------------------------
+test('DISCARD: an accepted writer removal is refused as a replay when a higher-sequence re-key reorders ahead of it', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+    const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
+    const seq = nextMembershipSequence(ctx.membershipState)
+
+    // Two owner-signed re-keys minted from the same epoch on a forked owner
+    // writer: both claim previousEpoch = current, at different sequences.
+    const removeLow = rekeyRecord(ctx, { victim: other.publicKey, sequence: seq })
+    const removeHigh = rekeyRecord(ctx, { victim: other.publicKey, sequence: seq + 1 })
+    const epochKeyBefore = Buffer.from(ctx.epochKey)
+
+    const first = await runPass(ctx, [removeLow, removeHigh], forkPoint)
+    assert.deepEqual(membershipSequences(first.appended), [seq],
+        'PRECONDITION: the low-sequence removal wins when it is presented first')
+    assert.equal(first.hostCalls.some((c) => c.fn === 'removeWriter'), true,
+        'PRECONDITION: the accepted removal must have been executed at the consensus layer')
+
+    ctx.setEpochKey(epochKeyBefore)
+    const second = await runPass(ctx, [removeHigh, removeLow], forkPoint)
+    assert.deepEqual(
+        membershipSequences(second.appended),
+        [seq],
+        'APPLIED THEN DISCARDED: apply accepted the sequence-' + seq + ' removal in one linearization — ' +
+        'calling host.removeWriter, and deleteEpochKey if the removed writer is local — and refused it as a ' +
+        'replay in another. The consensus-layer removal and the key-file unlink are not undone.',
+    )
+})
+
+// The five tests above are marked `todo`, so node:test reports them without
+// failing the run while the defect stands. That is the only way a known-red
+// regression suite can land without breaking CI — but it also means their
+// PRECONDITION assertions stop being enforced: if the staging rotted, they would
+// go on reporting "todo" and nobody would notice the suite had stopped proving
+// anything.
+//
+// This test is NOT todo. It re-asserts, cheaply, that each staging still puts a
+// real operation in front of apply and that apply still admits it in the first
+// order. If this goes red, the todo tests above are measuring nothing.
+test('HARNESS INTEGRITY: each staged scenario really is admitted in its first order', async (t) => {
+    const rigor = await ownedBase(t)
+    rigor.forkPoint.push({ op: 'board-config', record: boardConfigNode(rigor.ctx, false, 1) })
+    const ticket = sparseTicket('ticket-integrity')
+    const rigorPass = await runPass(
+        rigor.ctx,
+        [boardAddOp(rigor.ctx, ticket), boardConfigNode(rigor.ctx, true, 2)],
+        rigor.forkPoint,
+    )
+    assert.equal(hasItemEntry(rigorPass.appended, ticket.id), true,
+        'candidate 3 staging: a sparse board add must still be admitted under rigor-off')
+    assert.equal(hasItemFrame(rigorPass.frames, ticket.id), true,
+        'candidate 3 staging: the add must still reach the frontend')
+
+    const epoch = await baseWithSecondWriter(t)
+    const row = item({ id: 'item-integrity', text: 'Milk', listId: 'default', listType: 'shopping' })
+    const addOp = prepareListAppendOperation(
+        createListOperation('add', row, { listId: 'default', listType: 'shopping' }),
+        epoch.ctx,
+    )
+    assert.equal(Number(addOp.epoch) > 0, true,
+        'candidate 2 staging: list ops must still be epoch-tagged, or there is no epoch to mismatch')
+    const seq = nextMembershipSequence(epoch.ctx.membershipState)
+    const epochPass = await runPass(
+        epoch.ctx,
+        [addOp, rekeyRecord(epoch.ctx, { victim: epoch.other.publicKey, sequence: seq })],
+        epoch.forkPoint,
+    )
+    assert.equal(hasItemEntry(epochPass.appended, row.id), true,
+        'candidate 2 staging: the op must still be admitted at the epoch it was written under')
+    assert.equal(epochPass.hostCalls.some((c) => c.fn === 'removeWriter'), true,
+        'candidate 1 staging: the re-key must still reach the consensus layer')
+
+    const removal = await baseWithSecondWriter(t)
+    const low = nextMembershipSequence(removal.ctx.membershipState)
+    const removalPass = await runPass(
+        removal.ctx,
+        [
+            rekeyRecord(removal.ctx, { victim: removal.other.publicKey, sequence: low }),
+            rekeyRecord(removal.ctx, { victim: removal.other.publicKey, sequence: low + 1 }),
+        ],
+        removal.forkPoint,
+    )
+    assert.deepEqual(membershipSequences(removalPass.appended), [low],
+        'candidate 1 staging: the low-sequence removal must still win when presented first')
+})
+
+// ---------------------------------------------------------------------------
+// END TO END — the same discard, on a real two-writer base, with no staged
+// node order at all.
+//
+// The tests above present node orders directly to apply. This one proves those
+// orders are what Autobase actually produces. Autobase's linearizer breaks ties
+// between CONCURRENT nodes in `cmpUnlinked`: `b4a.compare(a.writer.core.key,
+// b.writer.core.key)` — lowest writer key first. So for two concurrent ops the
+// order is fixed by the writer keys, and both of the orders staged above are
+// reachable linearizations depending on which key is lower.
+//
+// That also makes this test deterministic instead of a coin flip: set up the
+// pair until the OWNER holds the lower writer key, so the owner's rigor-on
+// config is guaranteed to sort ahead of the other writer's concurrent add.
+// ---------------------------------------------------------------------------
+function connect (storeA, storeB) {
+    const a = storeA.replicate(true)
+    const b = storeB.replicate(false)
+    a.pipe(b).pipe(a)
+    return async () => {
+        try { a.destroy() } catch {}
+        try { b.destroy() } catch {}
+    }
+}
+
+async function settle (ctx, rounds = 10) {
+    for (let i = 0; i < rounds; i++) {
+        await ctx.autobase.update()
+        await new Promise((r) => setTimeout(r, 60))
+    }
+}
+
+async function partition (...ctxs) {
+    for (const ctx of ctxs) {
+        try { if (ctx.discovery) await ctx.discovery.destroy() } catch {}
+        try { if (ctx.swarm) await ctx.swarm.destroy() } catch {}
+        ctx.swarm = null
+        ctx.discovery = null
+    }
+}
+
+test('END TO END: a real peer is told about a ticket that the merged history then drops', { timeout: 600_000, todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+    const testnet = await createTestnet(3)
+    const dirs = []
+    const open = []
+    let disconnect = null
+    t.after(async () => {
+        setRpc(null)
+        if (disconnect) await disconnect()
+        for (const ctx of open) {
+            clearWriteChain(ctx)
+            try { await closeSharedBase(ctx) } catch {}
+        }
+        await testnet.destroy()
+        for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true })
+    })
+
+    // Build the pair until the owner's writer key sorts first. Only the owner
+    // can sign a board-config, so the roles cannot simply be swapped.
+    let ctxA = null
+    let ctxB = null
+    for (let attempt = 0; attempt < 10 && !ctxB; attempt++) {
+        const dirA = mkdir()
+        const dirB = mkdir()
+        dirs.push(dirA, dirB)
+        const a = createBaseContext({ role: 'shared' })
+        await openSharedBase(a, { storageDir: dirA, bootstrap: testnet.bootstrap })
+        await bootstrapSharedOwner(a)
+        setupSharedPairing(a)
+        const invite = createSharedInvite(a)
+        assert.ok(invite, 'owner minted an invite')
+        const joined = await joinSharedBaseViaInvite(createBaseContext, {
+            invite,
+            storageDir: dirB,
+            bootstrap: testnet.bootstrap,
+        })
+        assert.equal(joined.writable, true, 'the second peer must be an authorized writer')
+        open.push(a, joined.ctx)
+        if (b4a.compare(a.autobase.local.key, joined.ctx.autobase.local.key) < 0) {
+            ctxA = a
+            ctxB = joined.ctx
+        } else {
+            await partition(a, joined.ctx)
+        }
+    }
+    assert.ok(ctxB, 'could not build a pair with the owner holding the lower writer key')
+
+    // The board has been running with rigor OFF, and both peers know it.
+    await ctxA.autobase.append(boardConfigNode(ctxA, false, 1))
+    await settle(ctxA, 4)
+    await settle(ctxB, 10)
+    assert.equal(ctxB.boardConfigState?.config?.rigorOn, false,
+        'PRECONDITION: the joined peer must have replicated the rigor-off config')
+
+    await partition(ctxA, ctxB)
+
+    // The joined peer adds a sparse ticket. Its own write-time rigor gate reads
+    // rigorOn=false, so this is an ordinary, legal add — and its apply admits it
+    // and tells its frontend.
+    const frames = []
+    setRpc({
+        request: (command) => ({
+            command,
+            send: (data) => {
+                let payload = null
+                try { payload = JSON.parse(data) } catch { payload = data }
+                frames.push({ command, payload })
+            },
+        }),
+    })
+    assert.equal(await addItem('Fix the sink', 'work', 'board', null, ctxB), true,
+        'PRECONDITION: the add must be accepted while rigor is off')
+    await settle(ctxB, 4)
+
+    const announced = frames.map((f) => f.payload).find((p) => p?.text === 'Fix the sink')
+    assert.ok(announced, 'PRECONDITION: the frontend must have been told about the ticket')
+    assert.equal(
+        (await rebuildFromView(ctxB)).some((i) => i.id === announced.id), true,
+        'PRECONDITION: the ticket must be in the committed view before the merge',
+    )
+
+    // Meanwhile the owner turns rigor back on.
+    await ctxA.autobase.append(boardConfigNode(ctxA, true, 2))
+    await settle(ctxA, 4)
+
+    disconnect = connect(ctxA.store, ctxB.store)
+    await settle(ctxA, 12)
+    await settle(ctxB, 12)
+
+    // Non-vacuity: the merge really happened on B.
+    assert.equal(ctxB.boardConfigState?.config?.rigorOn, true,
+        'PRECONDITION: the joined peer must have merged the owner rigor-on config')
+
+    assert.equal(
+        (await rebuildFromView(ctxB)).some((i) => i.id === announced.id),
+        true,
+        'APPLIED THEN DISCARDED, end to end: this peer told its frontend the ticket exists, then the merged ' +
+        'history reordered the rigor-on config ahead of the add and the ticket left the committed view. ' +
+        'Nothing un-emits the frame, so the UI keeps a row no peer holds.',
+    )
+})
