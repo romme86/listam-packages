@@ -55,6 +55,7 @@ import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, 
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { createAnnouncementLog, committedItemIds } from './lib/announce.mjs'
+import { createEpochKeyring, resolveActiveEpochKey } from './lib/epoch-keyring.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { buildSyncListPayload } from './lib/sync-list-payload.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
@@ -894,13 +895,15 @@ function broadcastBoardConfig(ctx = primaryContext) {
 // (incrementally; full re-scan only after an actual reorg).
 const applyMembershipCheckpoint = createViewCheckpoint()
 
-// What apply has told the frontend exists on the personal base. Mirrors the
-// checkpoint above: per-context state that apply owns.
+// What apply has told the frontend exists on the personal base, and every epoch
+// key it has held. Mirror the checkpoint above: per-context state apply owns.
 const primaryAnnouncementLog = createAnnouncementLog()
+const primaryEpochKeyring = createEpochKeyring()
 
 export function resetApplyMembershipCheckpoint() {
     applyMembershipCheckpoint.reset()
     primaryAnnouncementLog.clear()
+    primaryEpochKeyring.clear()
 }
 
 // The personal (primary) base's context: a thin ADAPTER over the single global
@@ -919,11 +922,18 @@ export const primaryContext = {
     get currentList () { return currentList },
     setCurrentList,
     get epochKey () { return epochKey },
-    setEpochKey,
+    // Files every key into the keyring, exactly as a shared BaseContext does.
+    setEpochKey (v) {
+        setEpochKey(v)
+        if (v) primaryEpochKeyring.remember(v)
+    },
     get epochEncryptionKeyPair () { return epochEncryptionKeyPair },
     get ownerAuthorityKeyPair () { return ownerAuthorityKeyPair },
     applyMembershipCheckpoint,
     announcementLog: primaryAnnouncementLog,
+    epochKeyring: primaryEpochKeyring,
+    lastBroadcastMembership: null,
+    lastBroadcastBoardConfig: null,
 }
 
 // Push an item op from apply() to the frontend. For the personal base this is
@@ -1680,8 +1690,12 @@ export async function apply (ctx, nodes, view, host) {
             // and writer-set divergence between peers. See rebuildMembershipFromPersistedOps.
             await view.append({ op: 'membership', record: value })
 
+            // File the granted key, but do NOT make it active here: which epoch
+            // is current depends on the whole linearization, and this pass may
+            // be undone. reconcileEpochKey, at the end of the pass, points the
+            // active key at whatever the committed membership state asks for.
             if (result.effect?.epochGrants) {
-                await adoptGrantedEpochKey(ctx, result)
+                rememberGrantedEpochKey(ctx, result)
             }
 
             if (result.effect?.addWriterKey) {
@@ -1709,19 +1723,16 @@ export async function apply (ctx, nodes, view, host) {
                     })
                     notifyFrontend({ type: 'member-removal-incomplete', writerKey: result.effect.removeWriterKey, reason: outcome.reason })
                 }
-                if (ctx.autobase?.local?.key?.toString('hex') === result.effect.removeWriterKey) {
-                    ctx.setEpochKey(null)
-                    // Per-base persisted epoch keys for shared bases aren't wired
-                    // yet; only the personal base's stored key may be retired here.
-                    if (isPersonalContext(ctx)) await deleteEpochKey()
-                    logger.log('[AUDIT] Local writer was removed; retired local epoch key')
-                }
+                // Retiring THIS device's epoch key used to happen here. It now
+                // happens in reconcileEpochKey, from the committed removedWriters
+                // set: doing it mid-loop unlinked the key file for a removal a
+                // reorder could still refuse.
             }
 
-            // The writer set changed; refresh the frontend roster.
-            if (result.effect?.addWriterKey || result.effect?.removeWriterKey) {
-                broadcastMembershipRoster(ctx)
-            }
+            // Roster broadcasts are likewise deferred: they are a snapshot of
+            // membershipState, so emitting one per accepted op announces
+            // intermediate states, and a pass that is undone leaves the last one
+            // standing.
             continue
         }
 
@@ -1739,7 +1750,8 @@ export async function apply (ctx, nodes, view, host) {
                 continue
             }
             await view.append({ op: 'board-config', record: value })
-            broadcastBoardConfig(ctx)
+            // Broadcast deferred to the end of the pass, for the same reason as
+            // the roster: it is a snapshot of state this pass may still lose.
             continue
         }
 
@@ -1874,6 +1886,12 @@ export async function apply (ctx, nodes, view, host) {
     // corrected. That needs an autobase 'update' hook on both the personal and
     // shared wirings; it is not in this step.
     await retractDiscardedAnnouncements(ctx, view, viewReadFailed)
+
+    // The effects the loop deferred, now that the pass has settled on a
+    // membership and board state. Both are derived from that state rather than
+    // from which ops happened to be accepted, so both self-correct on a reorder.
+    await reconcileEpochKey(ctx)
+    broadcastSettledState(ctx)
 }
 
 function nodeWriterKeyHex(node) {
@@ -1900,7 +1918,9 @@ function operationObservedAt(operation) {
     return newest
 }
 
-async function adoptGrantedEpochKey(ctx, result) {
+// File a granted epoch key in the keyring. Deliberately does NOT make it active
+// or persist it — see reconcileEpochKey.
+function rememberGrantedEpochKey(ctx, result) {
     if (!ctx.autobase?.local?.key || !ctx.epochEncryptionKeyPair) return
 
     const localWriterKey = ctx.autobase.local.key.toString('hex')
@@ -1916,18 +1936,85 @@ async function adoptGrantedEpochKey(ctx, result) {
         return
     }
 
-    ctx.setEpochKey(grantedEpochKey)
-    // Persist the rotated key so it survives a restart: the personal base uses
-    // the global secure slot; a shared base persists per-base next to its
-    // Corestore (otherwise a reopen would reload the OLD epoch key and could not
-    // decrypt anything written under the new one). Shared-base rekey isn't wired
-    // yet, but this keeps adoption correct for when it is.
-    if (isPersonalContext(ctx)) await saveEpochKey(grantedEpochKey)
-    else persistSharedSecrets(ctx)
-    logger.log('[INFO] Adopted granted epoch key', {
+    ctx.epochKeyring?.remember(grantedEpochKey)
+    logger.log('[INFO] Filed granted epoch key', {
         epoch: result.state.currentEpoch,
         epochKeyHash: result.effect.epochKeyHash,
     })
+}
+
+// Point the active epoch key at whatever the COMMITTED membership state asks
+// for. Runs at the end of every apply pass, so a reorder that changes which
+// epoch won moves the pointer back rather than leaving the previous pass's
+// choice in place.
+//
+// Persistence follows the pointer, not the record: the key is written (or the
+// stored key retired) only once the pass has settled on it.
+async function reconcileEpochKey(ctx) {
+    // File whatever is currently active before considering a move. Several paths
+    // set the epoch key through the raw state setter rather than through a
+    // context — the boot load, lib/rekey.mjs, the join flow — so filing it here
+    // is what guarantees the keyring can always put the pointer back, whichever
+    // path installed the key.
+    ctx.epochKeyring?.remember(ctx.epochKey)
+
+    const localWriterKey = ctx.autobase?.local?.key ? ctx.autobase.local.key.toString('hex') : null
+    const decision = resolveActiveEpochKey({
+        keyring: ctx.epochKeyring,
+        membershipState: ctx.membershipState,
+        currentKey: ctx.epochKey,
+        localWriterKey,
+    })
+    if (!decision) return
+
+    ctx.setEpochKey(decision.key)
+    if (decision.key) {
+        // Persist so the key survives a restart: the personal base uses the
+        // global secure slot; a shared base persists per-base next to its
+        // Corestore (otherwise a reopen would reload the OLD epoch key and could
+        // not decrypt anything written under the new one).
+        if (isPersonalContext(ctx)) await saveEpochKey(decision.key)
+        else persistSharedSecrets(ctx)
+    } else if (isPersonalContext(ctx)) {
+        // Retire the stored key for a device the committed timeline has removed.
+        // Per-base persisted epoch keys for shared bases aren't wired yet.
+        //
+        // Safe to unlink even though a later reorder could un-remove us: the
+        // material stays in the in-memory keyring, so the branch above simply
+        // re-adopts and re-persists it.
+        await deleteEpochKey()
+    }
+    logger.log('[AUDIT] Epoch key reconciled against committed membership state', { reason: decision.reason })
+}
+
+// Roster and board config are SNAPSHOTS of reduced state, so re-emitting one is
+// harmless and emitting a stale one is not. Broadcasting from a fingerprint of
+// the committed state — rather than from "an op was accepted" — means a pass
+// that loses its ops corrects the frontend instead of leaving it on the last
+// intermediate state apply happened to announce.
+function membershipFingerprint(ctx) {
+    const s = ctx.membershipState
+    return JSON.stringify({
+        owner: s?.ownerAuthorityKey ?? null,
+        epoch: s?.currentEpoch ?? 0,
+        epochKeyHash: s?.currentEpochKeyHash ?? null,
+        sequence: s?.highestSequence ?? 0,
+        writers: [...(s?.writers ?? [])].sort(),
+        removed: [...(s?.removedWriters?.keys?.() ?? [])].sort(),
+    })
+}
+
+function broadcastSettledState(ctx) {
+    const membership = membershipFingerprint(ctx)
+    if (membership !== ctx.lastBroadcastMembership) {
+        ctx.lastBroadcastMembership = membership
+        broadcastMembershipRoster(ctx)
+    }
+    const boardConfig = JSON.stringify(ctx.boardConfigState?.config ?? null)
+    if (boardConfig !== ctx.lastBroadcastBoardConfig) {
+        ctx.lastBroadcastBoardConfig = boardConfig
+        broadcastBoardConfig(ctx)
+    }
 }
 
 function unwrapListOperation(ctx, value) {
@@ -1941,10 +2028,25 @@ function unwrapListOperation(ctx, value) {
         return null
     }
 
-    const operation = decryptEncryptedListOperation(value, ctx.epochKey)
+    const operation = decryptEncryptedListOperation(value, epochKeyForCurrentEpoch(ctx))
     if (!operation) {
         logger.log('[WARNING] Could not decrypt encrypted list op for current epoch')
         return null
     }
     return operation
+}
+
+// The key for the epoch the committed state is on — from the keyring, not from
+// the active pointer.
+//
+// The pointer only moves at the END of a pass (reconcileEpochKey), so within the
+// pass that accepts a re-key it still names the OLD epoch. An op written under
+// the new epoch and linearized after that re-key must still decrypt, so the
+// lookup goes by the epoch's key hash rather than by whatever the pointer
+// happens to be mid-pass.
+function epochKeyForCurrentEpoch(ctx) {
+    const wantHash = ctx.membershipState?.currentEpochKeyHash
+    if (!wantHash) return ctx.epochKey
+    if (epochKeyHashHex(ctx.epochKey) === wantHash) return ctx.epochKey
+    return ctx.epochKeyring?.forHash(wantHash) ?? ctx.epochKey
 }

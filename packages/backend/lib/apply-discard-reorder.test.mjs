@@ -10,9 +10,22 @@
 // The residual risk is per-operation, not per-list: an op that apply admits in
 // one linearization and REFUSES in another. Every refusal in apply is a bare
 // `continue` — but by then the op may already have produced a view entry and,
-// worse, an RPC frame the frontend has consumed. Autobase undoes the view. It
-// does not un-emit a frame, un-call `host.removeWriter`, or un-delete a key
-// file.
+// worse, an RPC frame the frontend has consumed. Autobase undoes the view; it
+// does not un-emit a frame.
+//
+// Two of those consequences have since been repaired, and their tests are green
+// rather than todo:
+//   - CONVERGENCE: a row announced on a discarded timeline is retracted, so the
+//     frontend converges on the committed view (lib/announce.mjs).
+//   - SETTLED EFFECT: the active epoch key follows committed membership state
+//     instead of the pass that installed it (lib/epoch-keyring.mjs).
+// `host.addWriter`/`removeWriter` cannot be moved out — autobase asserts
+// "System changes are only allowed in apply" — and they are its own state, rolled
+// back with the view.
+//
+// What is still RED is the VERDICT itself, which is 2.1 proper and a consensus
+// change: a peer that admits an op an older peer drops forks the mesh, so it
+// needs a rollout plan rather than a commit.
 //
 // So the invariant here is not about state, it is about DECISIONS:
 //
@@ -58,8 +71,10 @@ import {
     nextMembershipSequence,
 } from './membership.mjs'
 import {
+    createEncryptedListOperation,
     createEpochEncryptionKeyPair,
     createEpochGrants,
+    decryptEpochGrantForWriter,
     epochPublicKeyHex,
     generateEpochKey,
 } from './key-epochs.mjs'
@@ -322,11 +337,10 @@ test('DISCARD: a list op admitted at the current epoch is refused when the re-ke
 
     const rekey = rekeyRecord(ctx, { victim: other.publicKey, sequence: nextMembershipSequence(ctx.membershipState) })
 
-    // Accepting a re-key also rewrites ctx.epochKey (adoptGrantedEpochKey) and
-    // that mutation is NOT rolled back — a leak in its own right, asserted
-    // separately below. Restore it between passes so this test isolates the
-    // ordering effect rather than measuring the leak twice.
-    const epochKeyBefore = Buffer.from(ctx.epochKey)
+    // Accepting a re-key moves the active epoch key. That is now reconciled from
+    // committed state at the end of each pass (SETTLED EFFECT below), so nothing
+    // has to be restored by hand here — this test measures the ordering effect
+    // alone.
 
     const first = await runPass(ctx, [addOp, rekey], forkPoint)
     assert.equal(hasItemEntry(first.appended, row.id), true,
@@ -336,7 +350,6 @@ test('DISCARD: a list op admitted at the current epoch is refused when the re-ke
     assert.equal(first.hostCalls.some((c) => c.fn === 'removeWriter'), true,
         'PRECONDITION: the re-key must actually have removed the writer')
 
-    ctx.setEpochKey(epochKeyBefore)
     const second = await runPass(ctx, [rekey, addOp], forkPoint)
     assert.equal(
         hasItemEntry(second.appended, row.id),
@@ -346,7 +359,7 @@ test('DISCARD: a list op admitted at the current epoch is refused when the re-ke
     )
 })
 
-test('LEAKED SIDE EFFECT: a rolled-back re-key still leaves its epoch key installed on the context', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+test('SETTLED EFFECT: a rolled-back re-key gives the context its previous epoch key back', async (t) => {
     const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
     const rekey = rekeyRecord(ctx, { victim: other.publicKey, sequence: nextMembershipSequence(ctx.membershipState) })
     const before = Buffer.from(ctx.epochKey)
@@ -363,17 +376,52 @@ test('LEAKED SIDE EFFECT: a rolled-back re-key still leaves its epoch key instal
     assert.equal(
         before.equals(Buffer.from(ctx.epochKey)),
         true,
-        'apply installed an epoch key from a record that is no longer in the committed view, and the rollback did not remove it',
+        'the epoch key must follow the committed membership state, not the pass that installed it',
+    )
+})
+
+// The regression this refactor nearly introduced. Deferring adoption to the end
+// of the pass means the ACTIVE key still names the old epoch while the pass is
+// running — so an op written under the NEW epoch, linearized after the re-key,
+// would stop decrypting. Lookup goes by the epoch's key hash for exactly this.
+test('SETTLED EFFECT: an op written under the new epoch decrypts in the same pass as the re-key', async (t) => {
+    const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
+
+    const rekey = rekeyRecord(ctx, { victim: other.publicKey, sequence: nextMembershipSequence(ctx.membershipState) })
+    // The key the re-key grants us, encrypted for this device — the same one
+    // apply will file in the keyring when it accepts the record.
+    const grantedKey = decryptEpochGrantForWriter(
+        rekey.epochGrants,
+        ctx.autobase.local.key.toString('hex'),
+        ctx.epochEncryptionKeyPair,
+    )
+    assert.ok(grantedKey, 'PRECONDITION: the re-key must grant this device the new epoch key')
+
+    const row = item({ id: 'item-new-epoch', text: 'Bread', listId: 'default', listType: 'shopping' })
+    const listOp = createListOperation('add', row, { listId: 'default', listType: 'shopping' })
+    const newEpochOp = createEncryptedListOperation(listOp, grantedKey, rekey.epoch)
+    assert.equal(Number(newEpochOp.epoch), rekey.epoch, 'PRECONDITION: the op must be tagged with the NEW epoch')
+
+    const pass = await runPass(ctx, [rekey, newEpochOp], forkPoint)
+    assert.equal(
+        hasItemEntry(pass.appended, row.id),
+        true,
+        'an op under the newly granted epoch must decrypt in the same pass that accepted the re-key',
     )
 })
 
 // ---------------------------------------------------------------------------
 // CANDIDATE 1 — writer removal at consensus.
 //
-// This is the one whose side effects are irreversible OUTSIDE the view:
-// `host.removeWriter` mutates the Autobase writer set, and when the removed
-// writer is this device apply also calls `deleteEpochKey()` — a file unlink.
-// Neither is undone if the record is later refused.
+// `host.removeWriter` mutates the Autobase writer set. It cannot be lifted out
+// of apply (autobase asserts system changes are apply-only) and it is autobase's
+// own state, rolled back with the view.
+//
+// The key retirement that used to ride along with it — a `deleteEpochKey()` file
+// unlink, mid-loop — has been moved to the end-of-pass reconcile and made
+// recoverable from the in-memory keyring. What remains RED here is only the
+// verdict: the removal is accepted in one order and refused as a replay in the
+// other.
 //
 // Reachability is narrower than the other two: every membership record carries
 // the owner's signature and a monotonic sequence, so two competing membership
@@ -389,7 +437,6 @@ test('DISCARD: an accepted writer removal is refused as a replay when a higher-s
     // writer: both claim previousEpoch = current, at different sequences.
     const removeLow = rekeyRecord(ctx, { victim: other.publicKey, sequence: seq })
     const removeHigh = rekeyRecord(ctx, { victim: other.publicKey, sequence: seq + 1 })
-    const epochKeyBefore = Buffer.from(ctx.epochKey)
 
     const first = await runPass(ctx, [removeLow, removeHigh], forkPoint)
     assert.deepEqual(membershipSequences(first.appended), [seq],
@@ -397,14 +444,12 @@ test('DISCARD: an accepted writer removal is refused as a replay when a higher-s
     assert.equal(first.hostCalls.some((c) => c.fn === 'removeWriter'), true,
         'PRECONDITION: the accepted removal must have been executed at the consensus layer')
 
-    ctx.setEpochKey(epochKeyBefore)
     const second = await runPass(ctx, [removeHigh, removeLow], forkPoint)
     assert.deepEqual(
         membershipSequences(second.appended),
         [seq],
         'APPLIED THEN DISCARDED: apply accepted the sequence-' + seq + ' removal in one linearization — ' +
-        'calling host.removeWriter, and deleteEpochKey if the removed writer is local — and refused it as a ' +
-        'replay in another. The consensus-layer removal and the key-file unlink are not undone.',
+        'calling host.removeWriter — and refused it as a replay in another.',
     )
 })
 
