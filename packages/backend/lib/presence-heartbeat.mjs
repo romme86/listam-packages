@@ -64,6 +64,27 @@ function isOnline () {
     } catch { return false }
 }
 
+// Is anyone actually there to receive a beat?
+//
+// Presence is telemetry ABOUT this device FOR its peers, and it only reaches a
+// peer over a live connection. A beat written while nothing is connected cannot
+// be observed by anyone: by the time a peer arrives, `pokePresence` on that
+// connection publishes a fresh one that supersedes it. Those beats are pure
+// cost — and the cost is not small, because the base is append-only with no
+// compaction. Measured marginal cost of one beat: ~17.3 KB across the writer
+// core, the view and the corestore index, i.e. ~12.5 MB per device per DAY at
+// the 120s cadence, ~4.5 GB per device-year. An always-on peer alone on the
+// network was paying all of that to tell nobody anything.
+//
+// Deliberately distinct from isOnline(): reachability still governs ACCRUAL, so
+// avg-online keeps counting while this device is genuinely up and reachable. It
+// is only the append that waits for an audience.
+function hasAudience () {
+    try {
+        return (swarm?.connections?.size ?? 0) > 0
+    } catch { return false }
+}
+
 // Record that THIS device just performed a real (non-presence) mutation. In-memory
 // only — the next scheduled heartbeat carries it, so a mutation never adds a write.
 export function notePresenceInteraction () {
@@ -187,6 +208,17 @@ export async function writeHeartbeat ({ final = false } = {}) {
 
     const now = nowMs()
     accrue(now)
+
+    // Nobody connected: keep accruing, write nothing. The accrued total is not
+    // lost — it rides the next beat, which `pokePresence` fires as soon as a peer
+    // connects. A `final` flush still writes, so a clean shutdown records the
+    // session even if the last peer just left.
+
+    // Nobody connected: keep accruing, write nothing. The accrued total is not
+    // lost — it rides the next beat, which `pokePresence` fires as soon as a peer
+    // connects. A `final` flush still writes, so a clean shutdown records the
+    // session even if the last peer just left.
+    if (!final && !hasAudience()) return false
 
     // Coalesce: at most one append per cadence. A poke/first-beat with a stale
     // _lastWriteAt passes; a poke right after a beat is skipped (already fresh).

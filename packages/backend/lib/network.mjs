@@ -856,6 +856,12 @@ export async function initAutobase(newBaseKey, options = {}) {
             // A peer is reachable again, which is precisely the condition a
             // stalled writer was waiting for. Drain anything the outbox kept.
             tryReplayOutbox()
+            // ...and the condition a presence beat was waiting for. Beats are
+            // only written while something is connected (see hasAudience in
+            // presence-heartbeat.mjs), so this is what makes this device visible
+            // to the peer that just arrived, instead of up to a cadence later.
+            // Self-gating and coalescing, so a burst of connections is one write.
+            pokePresence()
             conn.on('close', () => {
                 if (grantChannel) {
                     _epochGrantChannels.delete(grantChannel)
