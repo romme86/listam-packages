@@ -847,6 +847,15 @@ export async function initAutobase(newBaseKey, options = {}) {
             logger.log('[ERROR] Replication swarm error:', err)
         })
         swarm.on('connection', (conn) => {
+          // DIAGNOSTIC (2026-07-28): on a failing CI join the HOST logs "New peer
+          // connected" and then nothing — it never reaches the replication attach
+          // a few statements below, so the connection carries no data and dies at
+          // the ~13s idle timeout. Everything between those two points is a
+          // candidate for throwing or hanging, so each step leaves a breadcrumb
+          // and the whole body is wrapped: an exception escaping into hyperswarm's
+          // emitter would otherwise be invisible here.
+          const step = (name) => logger.log('[INFO] conn-step', { step: name })
+          try {
             logger.log('[INFO] New peer connected (replication swarm)', b4a.from(conn.publicKey).toString('hex'))
             let grantChannel = null
             grantChannel = createEpochGrantChannel(conn, {
@@ -854,6 +863,7 @@ export async function initAutobase(newBaseKey, options = {}) {
                 logger,
                 onClose: () => _epochGrantChannels.delete(grantChannel),
             })
+            step('grant-channel')
             if (grantChannel) _epochGrantChannels.add(grantChannel)
             conn.on('error', (err) => {
                 logger.log('[ERROR] Replication connection error:', err)
@@ -861,15 +871,18 @@ export async function initAutobase(newBaseKey, options = {}) {
             setPeerCount(swarm.connections.size)
             broadcastPeerCount()
             broadcastNetworkStatus()
+            step('broadcasts')
             // A peer is reachable again, which is precisely the condition a
             // stalled writer was waiting for. Drain anything the outbox kept.
             tryReplayOutbox()
+            step('outbox')
             // ...and the condition a presence beat was waiting for. Beats are
             // only written while something is connected (see hasAudience in
             // presence-heartbeat.mjs), so this is what makes this device visible
             // to the peer that just arrived, instead of up to a cadence later.
             // Self-gating and coalescing, so a burst of connections is one write.
             pokePresence()
+            step('poke')
             conn.on('close', () => {
                 if (grantChannel) {
                     _epochGrantChannels.delete(grantChannel)
@@ -879,6 +892,7 @@ export async function initAutobase(newBaseKey, options = {}) {
                 broadcastPeerCount()
                 broadcastNetworkStatus()
             })
+            step('close-handler')
             if (autobase) {
                 const connectedBase = autobase
                 const startReplication = () => {
@@ -914,6 +928,11 @@ export async function initAutobase(newBaseKey, options = {}) {
                     // fresh record and another full repair batch on every socket.
                     // Deliver BEFORE starting Autobase replication so a stale
                     // peer has the key before it sees already-appended repairs.
+                    // NOTE: this branch DEFERS replication until an async grant
+                    // publish settles. If that promise never settles, replicate()
+                    // is never called and the connection idles out — exactly the
+                    // observed symptom, so the breadcrumb distinguishes it.
+                    step('grant-deferred-replication')
                     publishEpochGrantToChannel(grantChannel, _epochResyncRecord).catch((err) => {
                         logger.log('[ERROR] Connected-peer direct epoch grant failed:', err)
                     }).finally(startReplication)
@@ -926,6 +945,7 @@ export async function initAutobase(newBaseKey, options = {}) {
                     // first user edit and reproduced the permanent read-only
                     // UI on every launch. Replicate now; epoch rotation and
                     // explicit recovery flows own durable repair writes.
+                    step('direct-replication')
                     startReplication()
                     _epochResyncDone = false
                     _epochResyncRecord = null
@@ -933,6 +953,10 @@ export async function initAutobase(newBaseKey, options = {}) {
             } else {
                 logger.log('[WARNING] No Autobase yet to replicate with')
             }
+          } catch (e) {
+            // Whatever this is, it left the connection without replication.
+            logger.log('[ERROR] Connection handler threw before replicating:', e?.stack ?? e?.message ?? e)
+          }
         })
         // Track DHT reachability transitions for the header dot.
         wireNetworkStatusSignals(netGen)
