@@ -18,6 +18,8 @@ export function isTodoType(value: unknown): boolean
 export function legacyItemId(text: string, listId?: string): string
 export function normalizeItemId(item: ListLikeEntry | null | undefined): string | null
 export function identityKey(item: ListLikeEntry | null | undefined): string
+export function baseScopedKey(item: ListLikeEntry | null | undefined): string
+export function sameBaseScopedEntry(left: ListLikeEntry, right: ListLikeEntry): boolean
 export function updatedAtOf(item: ListLikeEntry | null | undefined): number
 export function isStaleUpdate(existing: ListLikeEntry | null | undefined, incoming: ListLikeEntry | null | undefined): boolean
 export function normalizeListEntry<T extends ListLikeEntry>(entry: T): T & { id: string; listId: string; listType: string }

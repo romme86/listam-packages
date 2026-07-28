@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+    baseScopedKey,
+    sameBaseScopedEntry,
+    identityKey,
     DEFAULT_LIST_TYPE,
     TODO_LIST_TYPE,
     NOTES_LIST_TYPE,
@@ -58,4 +61,48 @@ test('notes and todo types do not overlap', () => {
 
 test('normalizeListType round-trips the notes type (forward-compat)', () => {
     assert.equal(normalizeListType('notes'), 'notes')
+})
+
+// --- base-scoped identity (clients) -----------------------------------------
+
+test('a base-scoped key separates the same item id in different bases', () => {
+    const personal = { id: 'a', text: 'Milk', listId: 'shopping' }
+    const shared = { ...personal, baseKey: 'DEADBEEF' }
+    assert.notEqual(baseScopedKey(personal), baseScopedKey(shared))
+    // identityKey still collides — that IS the bug this exists for.
+    assert.equal(identityKey(personal), identityKey(shared))
+})
+
+test('a base-scoped key is stable for the same base', () => {
+    const a = { id: 'a', text: 'Milk', listId: 'shopping', baseKey: 'deadbeef' }
+    // Hex case and surrounding space are transport noise, not identity.
+    const b = { id: 'a', text: 'Milk', listId: 'shopping', baseKey: ' DEADBEEF ' }
+    assert.equal(baseScopedKey(a), baseScopedKey(b))
+    assert.equal(sameBaseScopedEntry(a, b), true)
+})
+
+test('a missing base key is the personal base, distinct from any shared one', () => {
+    const personal = { id: 'a', text: 'Milk', listId: 'shopping' }
+    assert.equal(baseScopedKey(personal), baseScopedKey({ ...personal, baseKey: '' }))
+    assert.equal(baseScopedKey(personal), baseScopedKey({ ...personal, baseKey: null }))
+    assert.notEqual(baseScopedKey(personal), baseScopedKey({ ...personal, baseKey: 'ab' }))
+})
+
+test('a base-scoped key still separates lists and items within one base', () => {
+    const base = { baseKey: 'ab' }
+    assert.notEqual(
+        baseScopedKey({ ...base, id: 'a', listId: 'one' }),
+        baseScopedKey({ ...base, id: 'a', listId: 'two' }),
+    )
+    assert.notEqual(
+        baseScopedKey({ ...base, id: 'a', listId: 'one' }),
+        baseScopedKey({ ...base, id: 'b', listId: 'one' }),
+    )
+})
+
+test('two bases sharing a listId do not collide', () => {
+    // The multiplexed-default shape: the same list id promoted into its own base.
+    const a = { id: 'x', text: 'Milk', listId: 'default', baseKey: 'aa' }
+    const b = { id: 'x', text: 'Milk', listId: 'default', baseKey: 'bb' }
+    assert.notEqual(baseScopedKey(a), baseScopedKey(b))
 })

@@ -631,12 +631,39 @@ export function syncListToFrontend (list = currentList) {
 // `view` (from ctxView) selects which base's epoch/membership encrypts the op;
 // callers without one (network.mjs, rekey.mjs) read the personal globals, so the
 // personal path is unchanged.
+// `baseKey` is TRANSPORT metadata: the backend stamps it on the way out to a
+// frontend so the client knows which base a row came from. It is never item
+// data.
+//
+// A client that edits such a row sends the whole item straight back, so without
+// this it would be persisted INTO the base. That is harmless while the item
+// stays put and actively wrong the moment it moves: a row carried into another
+// list would arrive with a stale base key that no longer says where it lives,
+// and every client keys rows by (baseKey, listId, itemId) — so it would be filed
+// under a base that does not own it, and the authoritative-base guard would then
+// refuse to show it at all.
+function stripTransportFields(op) {
+    if (!op || typeof op !== 'object') return op
+    const scrub = (item) => {
+        if (!item || typeof item !== 'object' || !('baseKey' in item)) return item
+        const { baseKey, ...rest } = item
+        return rest
+    }
+    if (Array.isArray(op.value)) {
+        const value = op.value.map(scrub)
+        return value.some((item, i) => item !== op.value[i]) ? { ...op, value } : op
+    }
+    const value = scrub(op.value)
+    return value === op.value ? op : { ...op, value }
+}
+
 export function prepareListAppendOperation(op, view) {
+    const clean = stripTransportFields(op)
     const ek = view ? view.epochKey : epochKey
     const ms = view ? view.membershipState : membershipState
     const currentEpoch = Number(ms?.currentEpoch) || 0
-    if (!ek || currentEpoch <= 0) return op
-    return createEncryptedListOperation(op, ek, currentEpoch) || op
+    if (!ek || currentEpoch <= 0) return clean
+    return createEncryptedListOperation(clean, ek, currentEpoch) || clean
 }
 
 // Persist and verify that an operation was written to disk

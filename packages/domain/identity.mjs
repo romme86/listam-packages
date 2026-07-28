@@ -59,6 +59,41 @@ export function identityKey(item) {
     return `${listId}\0${normalizeItemId({ ...item, listId }) ?? ''}`
 }
 
+// `baseKey` as it appears on an item reaching a CLIENT: transport metadata the
+// backend stamps on the way out (hex for a shared base, absent for the personal
+// one). Never item data — see the strip at the backend's write boundary.
+function normalizeItemBaseKey(value) {
+    if (typeof value !== 'string') return ''
+    return value.trim().toLowerCase()
+}
+
+// Item identity for a CLIENT: (baseKey, listId, itemId).
+//
+// Sharing a list promotes it — the items are re-seeded into a new single-list
+// base with the SAME ids, then the personal copies are tombstoned. The two bases
+// replicate independently, so a late personal tombstone matches the shared copy
+// under `identityKey` (which has no base) and deletes the list that was just
+// shared. `isFromAuthoritativeBase` filters that, but it FAILS OPEN by design:
+// an unknown list — registry not replicated yet — is accepted, which is exactly
+// the window the race lives in.
+//
+// Scoping the key by base removes the collision instead of filtering it: the
+// tombstone and the shared copy simply are not the same row. The guard still
+// decides which base a list should be SHOWN from; this decides what can clobber
+// what. They are complementary, and this one holds when the guard fails open.
+//
+// Deliberately NOT `identityKey` itself. That one is shared with the backend,
+// where it drives `applyOperationToList` inside apply — changing it there would
+// change what apply produces, which is a consensus change. Inside a base every
+// item is from that base, so there is nothing for a base scope to disambiguate.
+export function baseScopedKey(item) {
+    return `${normalizeItemBaseKey(item?.baseKey)}\0${identityKey(item)}`
+}
+
+export function sameBaseScopedEntry(left, right) {
+    return baseScopedKey(left) === baseScopedKey(right)
+}
+
 export function updatedAtOf(item) {
     return typeof item?.updatedAt === 'number' ? item.updatedAt : 0
 }
