@@ -42,7 +42,14 @@ const FLAGS = {
     //
     // Flip only once every peer runs a build that reads the stamp; until then an
     // older peer ignores it and applies its own rule to the same ticket.
-    stampBoardConfigOnWrite: false,
+    //
+    // FLIPPED 2026-07-28, after verifying the precondition on the LIVE mesh rather
+    // than from notes: desktop (release 5170), pi-headless and geekom-headless all
+    // run a build containing 98cc50b, which is the read side. The geekom was the
+    // holdout — it sat on 2d6df32 while a stale note claimed the mesh was ready —
+    // and was updated to ac0c4dd first. Re-read the roster before assuming this
+    // stays true; it had six writers when the plan assumed four.
+    stampBoardConfigOnWrite: true,
 
     // apply accepts an encrypted op written under a superseded epoch, provided
     // this device still holds a key that opens it and the op's writer is not one
@@ -58,7 +65,15 @@ const FLAGS = {
     // read it whatever apply decides. The check only destroys data. The write
     // side (refuseStaleEpochMutation) is what actually stops new stale-epoch
     // writes.
-    acceptHeldEpochOps: false,
+    //
+    // FLIPPED 2026-07-28, same release as stampBoardConfigOnWrite. This one has a
+    // SECOND precondition beyond "reads the flag": opening an op against a held
+    // key needs the keyring from e75fce3, and a peer without it unlinks superseded
+    // keys on every rotation. The geekom read the flag but had no keyring, so
+    // flipping before updating it would have made desktop and pi admit ops the
+    // geekom drops — a divergence, not just the local freeze the keyring fix was
+    // written for. Check BOTH facts before assuming a peer is ready.
+    acceptHeldEpochOps: true,
 }
 
 const flags = { ...FLAGS }

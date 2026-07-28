@@ -10,10 +10,13 @@ import { rolloutEnabled, setRolloutFlag, resetRolloutFlags, rolloutFlags } from 
 const SHIPPED = {
     // Flipped 2026-07-27, one release after the code landed (dd6a169).
     rigorNotRetroactive: true,
-    // Ships off: writers must not start stamping until every peer reads stamps.
-    stampBoardConfigOnWrite: false,
-    // Ships off: an upgraded peer would keep old-epoch ops an older peer drops.
-    acceptHeldEpochOps: false,
+    // Flipped 2026-07-28: every peer now runs a build containing 98cc50b, the
+    // read side, so writers may start stamping.
+    stampBoardConfigOnWrite: true,
+    // Flipped 2026-07-28. Needed BOTH preconditions, not just "reads the flag":
+    // opening an op against a held key also needs the e75fce3 keyring, and the
+    // geekom had the reader without the keyring until it was updated first.
+    acceptHeldEpochOps: true,
 }
 
 test('the shipped flags are exactly what this test declares', () => {

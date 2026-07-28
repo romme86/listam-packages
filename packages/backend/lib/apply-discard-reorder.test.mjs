@@ -60,7 +60,7 @@ import {
 } from './shared-base.mjs'
 import { addItem, clearWriteChain, prepareListAppendOperation } from './item.mjs'
 import { setRpc } from './state.mjs'
-import { setRolloutFlag, resetRolloutFlags } from './rollout.mjs'
+import { setRolloutFlag, resetRolloutFlags, rolloutFlags } from './rollout.mjs'
 import { RPC_DELETE_FROM_BACKEND } from '@listam/protocol'
 import { apply } from '../backend.mjs'
 import { createListOperation } from './list-reducer.mjs'
@@ -359,10 +359,14 @@ test('WRITE SIDE: addItem stamps the config it has seen, only when the flag is o
         return row.boardConfigSeq
     }
 
+    // Both halves set the flag explicitly. This test is about what the flag
+    // DOES; rollout.test.mjs is what pins its shipped default, and leaning on
+    // that default here made this test fail the moment the flag flipped.
+    t.after(() => resetRolloutFlags())
+    setRolloutFlag('stampBoardConfigOnWrite', false)
     assert.equal(await stampOf('unstamped'), undefined, 'nothing is stamped while the flag is off')
 
     setRolloutFlag('stampBoardConfigOnWrite', true)
-    t.after(() => resetRolloutFlags())
     // No board-config record on this base, so the writer is on the default: 0.
     assert.equal(await stampOf('stamped'), 0, 'the seen config sequence is recorded')
 })
@@ -378,7 +382,13 @@ test('WRITE SIDE: addItem stamps the config it has seen, only when the flag is o
 // Closing this needs the causal-past rule: "was the config in the op's causal
 // past" is intrinsic to the two records, where "is it in the prefix" is not.
 // Until then the announcement retraction makes it recoverable rather than silent.
-test('KNOWN RESIDUAL: a ticket written concurrently with the rigor-on config is still order-dependent', { todo: 'closed by the stamp (STAMPED VERDICT above); RED until stampBoardConfigOnWrite flips and writers stamp' }, async (t) => {
+// NOTE 2026-07-28: stampBoardConfigOnWrite is now ON, so a writer running this
+// build stamps and this case is closed for it (proved by STAMPED VERDICT, and
+// end to end by END TO END CONVERGENCE needing stampOnWrite:false to still find
+// a discard). This op is hand-built and carries NO stamp, so what stays red here
+// is the un-upgraded writer — real until the whole mesh runs the flipped build,
+// and after that only closable by the causal-past rule.
+test('KNOWN RESIDUAL: an UNSTAMPED ticket written concurrently with the rigor-on config is still order-dependent', { todo: 'the unstamped/un-upgraded writer case; a stamping writer is already closed. Needs the causal-past rule, not another flag' }, async (t) => {
     setRolloutFlag('rigorNotRetroactive', true)
     t.after(() => resetRolloutFlags())
 
@@ -775,7 +785,12 @@ async function partition (...ctxs) {
 // dropped it. The two tests below read different things from it — one asserts
 // the row should never have been dropped (that is 2.1), the other asserts that
 // since it WAS dropped, the frontend is told (that is this step).
-async function stageRealDiscard (t, { rigorOnBeforeAdd = false } = {}) {
+// `stampOnWrite: false` makes the joined peer write WITHOUT a boardConfigSeq,
+// which is what an un-upgraded peer does. That is not a hypothetical: the flag
+// flipped 2026-07-28 and the fork window stays open until every peer runs the
+// flipped build, so an unstamped add arriving at a stamping apply is the
+// reachable case for as long as the rollout lasts.
+async function stageRealDiscard (t, { rigorOnBeforeAdd = false, stampOnWrite = true } = {}) {
     const testnet = await createTestnet(3)
     const dirs = []
     const open = []
@@ -852,8 +867,13 @@ async function stageRealDiscard (t, { rigorOnBeforeAdd = false } = {}) {
             },
         }),
     })
+    // Restore the exact prior value rather than resetRolloutFlags(), which would
+    // also clobber a rigorNotRetroactive the CALLER set before staging.
+    const priorStamp = rolloutFlags().stampBoardConfigOnWrite
+    if (!stampOnWrite) setRolloutFlag('stampBoardConfigOnWrite', false)
     assert.equal(await addItem('Fix the sink', 'work', 'board', null, ctxB), true,
         'PRECONDITION: the add must be accepted while rigor is off')
+    setRolloutFlag('stampBoardConfigOnWrite', priorStamp)
     await settle(ctxB, 4)
 
     const announced = frames.map((f) => f.payload).find((p) => p?.text === 'Fix the sink')
@@ -911,17 +931,27 @@ test('END TO END SETTLED VERDICT: with the flag on, the merged history keeps the
     )
 })
 
-test('END TO END CONVERGENCE: the discarded row is retracted on a real base', { timeout: 600_000 }, async (t) => {
-    // Staged so the ticket's stamp lands AFTER the rigor-on transition, which is
-    // the case the timestamp rule cannot decide (KNOWN RESIDUAL) — so a row is
-    // still discarded here even with rigorNotRetroactive on, and the retraction
-    // still has something to correct.
-    const { ctxB, announced, frames } = await stageRealDiscard(t, { rigorOnBeforeAdd: true })
+test('END TO END CONVERGENCE: an unstamped row discarded on a real base is retracted', { timeout: 600_000 }, async (t) => {
+    // RETARGETED 2026-07-28, when stampBoardConfigOnWrite flipped on.
+    //
+    // It used to stage a STAMPED add whose wall clock landed after the rigor-on
+    // transition. The stamp closes exactly that case, so the precondition below
+    // started failing with `true !== false` — the row is no longer dropped. That
+    // is the flip working, demonstrated on a real two-writer base.
+    //
+    // The old comment said to retire this test when that happened, "with the todo
+    // test above". But KNOWN RESIDUAL did NOT go green: it hand-builds an
+    // UNSTAMPED op, and the verdict is still order-dependent for those. So the
+    // condition for retiring was never met, and deleting this would have dropped
+    // real-base coverage of the case that is reachable RIGHT NOW — an un-upgraded
+    // peer writing without a stamp while the mesh finishes rolling out. Retire it
+    // once the fork window is closed AND unstamped ops are gone.
+    const { ctxB, announced, frames } = await stageRealDiscard(t, {
+        rigorOnBeforeAdd: true,
+        stampOnWrite: false,
+    })
 
     // Non-vacuity: this test is only meaningful while the row really is dropped.
-    // If 2.1 lands and the verdict stops depending on order, the todo test above
-    // goes green and this one must be retired with it rather than left asserting
-    // a retraction that should no longer happen.
     assert.equal(
         (await rebuildFromView(ctxB)).some((i) => i.id === announced.id),
         false,
