@@ -70,6 +70,10 @@
     "./authoritative-base": {
       "types": "./authoritative-base.d.ts",
       "default": "./authoritative-base.mjs"
+    },
+    "./peer-display": {
+      "types": "./peer-display.d.ts",
+      "default": "./peer-display.mjs"
     }
   },
   "files": [
@@ -101,6 +105,12 @@
     "value.d.ts",
     "voice-grammar.mjs",
     "voice-intent.mjs",
+    "meta.mjs",
+    "meta.d.ts",
+    "authoritative-base.mjs",
+    "authoritative-base.d.ts",
+    "peer-display.mjs",
+    "peer-display.d.ts",
     "LICENSE"
   ],
   "publishConfig": {
