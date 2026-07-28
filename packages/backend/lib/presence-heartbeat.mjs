@@ -208,9 +208,21 @@ export async function writeHeartbeat ({ final = false } = {}) {
 
 async function flushObservedWriterActivity () {
     _observedTimer = null
+    if (_pendingObservedAt.size === 0) return
+
+    // Same gate the heartbeat uses, and for the same reason it gives: an offline
+    // or non-writable write cannot replicate and stalls up to FLUSHABLE_WAIT_MS
+    // inside the SERIALIZED write chain — so it does not merely delay itself, it
+    // holds up every other write behind it. During a join that is the join's own
+    // write access, which then times out.
+    //
+    // This attestation is best-effort telemetry: keep the pending observations
+    // and let the next noteObservedWriterActivity schedule another flush, rather
+    // than block anything for them.
+    if (!autobase?.writable || !isOnline()) return
+
     const pending = [..._pendingObservedAt.entries()]
     _pendingObservedAt.clear()
-    if (pending.length === 0) return
 
     try {
         if (!canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair)) return
