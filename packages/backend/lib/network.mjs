@@ -155,9 +155,10 @@ let _tempPairing = null
 // Also syncs replicated items on each attempt so the guest sees the host's
 // list even before write access is confirmed.
 function cleanupTempSwarm() {
-    // DIAGNOSTIC (2026-07-28): this teardown lands immediately before the guest's
-    // main-swarm connections start dying silently at the idle timeout, so record
-    // what is actually being destroyed and what the main swarm holds at the time.
+    // Recorded because join failures are hard to reconstruct after the fact:
+    // this teardown lands right where a guest's main-swarm connections start
+    // dying at the idle timeout, and knowing what was destroyed and what the
+    // main swarm held at the time is what separates the two cases.
     logger.log('[INFO] Temp swarm teardown', {
         tempConnections: _tempSwarm?.connections?.size ?? null,
         mainConnections: swarm?.connections?.size ?? null,
@@ -847,14 +848,9 @@ export async function initAutobase(newBaseKey, options = {}) {
             logger.log('[ERROR] Replication swarm error:', err)
         })
         swarm.on('connection', (conn) => {
-          // DIAGNOSTIC (2026-07-28): on a failing CI join the HOST logs "New peer
-          // connected" and then nothing — it never reaches the replication attach
-          // a few statements below, so the connection carries no data and dies at
-          // the ~13s idle timeout. Everything between those two points is a
-          // candidate for throwing or hanging, so each step leaves a breadcrumb
-          // and the whole body is wrapped: an exception escaping into hyperswarm's
-          // emitter would otherwise be invisible here.
-          const step = (name) => logger.log('[INFO] conn-step', { step: name })
+          // An exception escaping into hyperswarm's emitter would leave the
+          // connection attached to nothing, with no trace anywhere — the exact
+          // symptom this handler was investigated for. Log it instead.
           try {
             logger.log('[INFO] New peer connected (replication swarm)', b4a.from(conn.publicKey).toString('hex'))
             let grantChannel = null
@@ -863,7 +859,6 @@ export async function initAutobase(newBaseKey, options = {}) {
                 logger,
                 onClose: () => _epochGrantChannels.delete(grantChannel),
             })
-            step('grant-channel')
             if (grantChannel) _epochGrantChannels.add(grantChannel)
             conn.on('error', (err) => {
                 logger.log('[ERROR] Replication connection error:', err)
@@ -871,18 +866,15 @@ export async function initAutobase(newBaseKey, options = {}) {
             setPeerCount(swarm.connections.size)
             broadcastPeerCount()
             broadcastNetworkStatus()
-            step('broadcasts')
             // A peer is reachable again, which is precisely the condition a
             // stalled writer was waiting for. Drain anything the outbox kept.
             tryReplayOutbox()
-            step('outbox')
             // ...and the condition a presence beat was waiting for. Beats are
             // only written while something is connected (see hasAudience in
             // presence-heartbeat.mjs), so this is what makes this device visible
             // to the peer that just arrived, instead of up to a cadence later.
             // Self-gating and coalescing, so a burst of connections is one write.
             pokePresence()
-            step('poke')
             conn.on('close', () => {
                 if (grantChannel) {
                     _epochGrantChannels.delete(grantChannel)
@@ -892,17 +884,14 @@ export async function initAutobase(newBaseKey, options = {}) {
                 broadcastPeerCount()
                 broadcastNetworkStatus()
             })
-            step('close-handler')
             if (autobase) {
                 const connectedBase = autobase
                 const startReplication = () => {
-                    // DIAGNOSTIC (2026-07-28): a guest's main-swarm connections
-                    // establish and then carry no data at all, dying at the ~13s
-                    // hyperswarm idle timeout over and over with view: 0, while
-                    // the same guest replicates fine over the pairing temp swarm.
-                    // Authorization is NOT the problem — the host logs "Added
-                    // writer from owner-signed membership op". So the question is
-                    // whether replicate() is reached here, and against which base.
+                    // One line per connection, and it earns its keep: a join that
+                    // never replicates looks identical from the outside whether
+                    // replicate() was skipped, aimed at a superseded base, threw,
+                    // or worked perfectly and the transport carried nothing. On
+                    // 2026-07-28 this is what proved the last of those.
                     const skipped = conn.destroyed
                         ? 'conn-destroyed'
                         : connectedBase.closing ? 'base-closing' : null
@@ -929,10 +918,9 @@ export async function initAutobase(newBaseKey, options = {}) {
                     // Deliver BEFORE starting Autobase replication so a stale
                     // peer has the key before it sees already-appended repairs.
                     // NOTE: this branch DEFERS replication until an async grant
-                    // publish settles. If that promise never settles, replicate()
-                    // is never called and the connection idles out — exactly the
-                    // observed symptom, so the breadcrumb distinguishes it.
-                    step('grant-deferred-replication')
+                    // publish settles — a promise that never settles would leave
+                    // the connection idling with no data. Ruled out as the cause
+                    // of the 2026-07-28 CI join failures, but keep it in mind.
                     publishEpochGrantToChannel(grantChannel, _epochResyncRecord).catch((err) => {
                         logger.log('[ERROR] Connected-peer direct epoch grant failed:', err)
                     }).finally(startReplication)
@@ -945,7 +933,6 @@ export async function initAutobase(newBaseKey, options = {}) {
                     // first user edit and reproduced the permanent read-only
                     // UI on every launch. Replicate now; epoch rotation and
                     // explicit recovery flows own durable repair writes.
-                    step('direct-replication')
                     startReplication()
                     _epochResyncDone = false
                     _epochResyncRecord = null
