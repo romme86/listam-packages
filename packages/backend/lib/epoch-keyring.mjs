@@ -40,6 +40,10 @@ export function createEpochKeyring () {
 
         has (hash) { return typeof hash === 'string' && byHash.has(hash) },
 
+        // Every key held, newest first — the order a decrypt-with-anything
+        // fallback should try them in.
+        keys () { return [...byHash.values()].reverse() },
+
         clear () { byHash.clear() },
     }
 }

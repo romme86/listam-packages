@@ -38,6 +38,19 @@ test('remembering the same key twice keeps one entry', () => {
     assert.equal(keyring.size, 1)
 })
 
+test('keys() exposes every held key, newest first', () => {
+    // Newest first because a decrypt-with-anything fallback should try the most
+    // likely key before older ones.
+    const keyring = createEpochKeyring()
+    const older = generateEpochKey()
+    const newer = generateEpochKey()
+    keyring.remember(older)
+    keyring.remember(newer)
+    assert.deepEqual(keyring.keys(), [newer, older])
+    keyring.clear()
+    assert.deepEqual(keyring.keys(), [])
+})
+
 test('no committed epoch means no change', () => {
     const keyring = createEpochKeyring()
     assert.equal(resolveActiveEpochKey({

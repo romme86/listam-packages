@@ -128,7 +128,7 @@ async function rebuildFromView (ctx) {
 // One apply pass over `nodes`, against a view truncated back to `forkPoint`.
 // Returns everything a rollback would have to undo: the view entries apply
 // appended, the RPC frames it emitted, and the consensus-layer calls it made.
-async function runPass (ctx, nodes, forkPoint) {
+async function runPass (ctx, nodes, forkPoint, { writerKey } = {}) {
     const frames = []
     setRpc({
         request: (command) => ({
@@ -147,7 +147,10 @@ async function runPass (ctx, nodes, forkPoint) {
         removeWriter: async (key) => { hostCalls.push({ fn: 'removeWriter', key: key.toString('hex') }) },
         removeable: () => true,
     }
-    await apply(ctx, nodes.map((value) => ({ value })), view, host)
+    // Autobase hands apply `from` (the writer's core), not `writer` — mirror that
+    // shape or the writer-dependent branches never run.
+    const from = { key: writerKey ?? ctx.autobase.local.key }
+    await apply(ctx, nodes.map((value) => ({ value, from })), view, host)
     setRpc(null)
     return {
         appended: view.entries.slice(forkPoint.length),
@@ -489,7 +492,10 @@ function rekeyRecord (ctx, { victim, sequence }) {
     })
 }
 
-test('DISCARD: a list op admitted at the current epoch is refused when the re-key reorders ahead of it', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+test('SETTLED VERDICT: a list op written under the previous epoch survives the re-key reordering ahead of it', async (t) => {
+    setRolloutFlag('acceptHeldEpochOps', true)
+    t.after(() => resetRolloutFlags())
+
     const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
 
     // An ordinary item, encrypted and tagged with the epoch live at write time.
@@ -517,9 +523,59 @@ test('DISCARD: a list op admitted at the current epoch is refused when the re-ke
     assert.equal(
         hasItemEntry(second.appended, row.id),
         true,
-        'APPLIED THEN DISCARDED: the same add is admitted before the re-key and refused after it. ' +
-        'The frontend already has the row; the committed view does not.',
+        'a member\'s op, written under the epoch it held at the time, must survive the re-key landing ahead of it',
     )
+})
+
+test('SETTLED VERDICT: an old-epoch op from a REMOVED writer is still refused', async (t) => {
+    // Non-vacuity: accepting old-epoch ops is not a blanket accept. This is also
+    // strictly stronger than the epoch check it replaces — a removed writer is
+    // refused at ANY epoch, not merely filtered by which key it happened to use.
+    setRolloutFlag('acceptHeldEpochOps', true)
+    t.after(() => resetRolloutFlags())
+
+    const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
+    const row = item({ id: 'item-removed-writer', text: 'Milk', listId: 'default', listType: 'shopping' })
+    const addOp = prepareListAppendOperation(
+        createListOperation('add', row, { listId: 'default', listType: 'shopping' }), ctx,
+    )
+    const rekey = rekeyRecord(ctx, { victim: other.publicKey, sequence: nextMembershipSequence(ctx.membershipState) })
+
+    // Commit the removal, then replay the op as if it came from the removed peer.
+    const removal = await runPass(ctx, [rekey], forkPoint)
+    assert.equal(removal.hostCalls.some((c) => c.fn === 'removeWriter'), true,
+        'PRECONDITION: the removal must have been accepted')
+    const afterRemoval = [...forkPoint, ...removal.appended]
+
+    const asRemoved = await runPass(ctx, [addOp], afterRemoval, { writerKey: other.publicKey })
+    assert.equal(hasItemEntry(asRemoved.appended, row.id), false,
+        'a removed writer must not get an old-epoch op through')
+
+    // And the same op from a writer still in the roster IS accepted, so the
+    // refusal above is about who wrote it, not about the epoch alone.
+    const asMember = await runPass(ctx, [addOp], afterRemoval)
+    assert.equal(hasItemEntry(asMember.appended, row.id), true,
+        'a current member must still get its old-epoch op through')
+})
+
+test('SETTLED VERDICT: an old-epoch op we hold no key for is refused', async (t) => {
+    // The relaxation trusts the AEAD, not the epoch tag: an op that opens under
+    // no key this device holds is not admitted just because it claims an epoch.
+    setRolloutFlag('acceptHeldEpochOps', true)
+    t.after(() => resetRolloutFlags())
+
+    const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
+    const row = item({ id: 'item-foreign-key', text: 'Milk', listId: 'default', listType: 'shopping' })
+    const foreign = createEncryptedListOperation(
+        createListOperation('add', row, { listId: 'default', listType: 'shopping' }),
+        generateEpochKey(),
+        1,
+    )
+    const rekey = rekeyRecord(ctx, { victim: other.publicKey, sequence: nextMembershipSequence(ctx.membershipState) })
+
+    const pass = await runPass(ctx, [rekey, foreign], forkPoint)
+    assert.equal(hasItemEntry(pass.appended, row.id), false,
+        'an op encrypted under a key this device never held must not be admitted')
 })
 
 test('SETTLED EFFECT: a rolled-back re-key gives the context its previous epoch key back', async (t) => {

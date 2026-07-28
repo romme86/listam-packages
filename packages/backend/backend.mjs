@@ -1763,7 +1763,7 @@ export async function apply (ctx, nodes, view, host) {
             continue
         }
 
-        const unwrappedOperation = unwrapListOperation(ctx, value)
+        const unwrappedOperation = unwrapListOperation(ctx, value, nodeWriterKeyHex(node))
         if (!unwrappedOperation) continue
 
         // Legacy add-writer records are intentionally no longer authoritative.
@@ -1926,9 +1926,17 @@ export async function apply (ctx, nodes, view, host) {
     broadcastSettledState(ctx)
 }
 
+// The writer a node came from.
+//
+// Autobase hands apply `{ indexed, optimistic, from, length, value, heads }`,
+// where `from` IS the writer's core — there is no `.writer`. Reading only the
+// old shape returned null for every node, so `noteObservedWriterActivity` has
+// never once fired. Verified against autobase directly: apply receives exactly
+// those six fields and `from.key` equals the appending writer's key. The older
+// paths stay as a fallback for a runtime that still passes `writer`.
 function nodeWriterKeyHex(node) {
     try {
-        const key = node?.writer?.core?.key ?? node?.writer?.key
+        const key = node?.from?.key ?? node?.writer?.core?.key ?? node?.writer?.key
         return key ? b4a.toString(key, 'hex') : null
     } catch {
         return null
@@ -2049,10 +2057,26 @@ function broadcastSettledState(ctx) {
     }
 }
 
-function unwrapListOperation(ctx, value) {
+function unwrapListOperation(ctx, value, writerKeyHex) {
     if (!isEncryptedListOperation(value)) return value
 
-    if (Number(value.epoch) !== Number(ctx.membershipState?.currentEpoch)) {
+    const opEpoch = Number(value.epoch)
+    const currentEpoch = Number(ctx.membershipState?.currentEpoch)
+
+    if (opEpoch === currentEpoch) {
+        const operation = decryptEncryptedListOperation(value, epochKeyForCurrentEpoch(ctx))
+        if (!operation) {
+            logger.log('[WARNING] Could not decrypt encrypted list op for current epoch')
+            return null
+        }
+        return operation
+    }
+
+    // Superseded epoch. Dropping it outright is what makes this verdict depend on
+    // order: the current epoch advances mid-loop when a re-key is reduced, so an
+    // op written before its author learned of the rotation is kept or discarded
+    // according to which side of the re-key it lands on.
+    if (!rolloutEnabled('acceptHeldEpochOps')) {
         logger.log('[WARNING] Ignoring encrypted list op for inactive epoch', {
             opEpoch: value.epoch,
             currentEpoch: ctx.membershipState?.currentEpoch,
@@ -2060,12 +2084,34 @@ function unwrapListOperation(ctx, value) {
         return null
     }
 
-    const operation = decryptEncryptedListOperation(value, epochKeyForCurrentEpoch(ctx))
-    if (!operation) {
-        logger.log('[WARNING] Could not decrypt encrypted list op for current epoch')
+    // Without an identifiable writer the removal check below cannot run, so stay
+    // on the old behaviour rather than accept blind.
+    if (!writerKeyHex) {
+        logger.log('[WARNING] Ignoring old-epoch list op from an unidentified writer', { opEpoch: value.epoch })
         return null
     }
-    return operation
+
+    // A writer the committed timeline has removed gets nothing, at any epoch —
+    // strictly stronger than the epoch check it replaces, which only ever
+    // filtered them by which key they happened to use.
+    if (ctx.membershipState?.removedWriters?.has?.(writerKeyHex)) {
+        logger.log('[WARNING] Ignoring old-epoch list op from a removed writer', { opEpoch: value.epoch })
+        return null
+    }
+
+    // A current member wrote this under a key it legitimately held. Try every key
+    // this device holds: the epoch tag is authenticated as AEAD associated data,
+    // so an op that opens under one of them is genuinely that epoch's.
+    for (const key of ctx.epochKeyring?.keys?.() ?? []) {
+        const operation = decryptEncryptedListOperation(value, key)
+        if (operation) return operation
+    }
+
+    logger.log('[WARNING] Could not decrypt old-epoch list op with any held key', {
+        opEpoch: value.epoch,
+        currentEpoch: ctx.membershipState?.currentEpoch,
+    })
+    return null
 }
 
 // The key for the epoch the committed state is on — from the keyring, not from

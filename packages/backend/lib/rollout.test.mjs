@@ -12,6 +12,8 @@ const SHIPPED = {
     rigorNotRetroactive: true,
     // Ships off: writers must not start stamping until every peer reads stamps.
     stampBoardConfigOnWrite: false,
+    // Ships off: an upgraded peer would keep old-epoch ops an older peer drops.
+    acceptHeldEpochOps: false,
 }
 
 test('the shipped flags are exactly what this test declares', () => {

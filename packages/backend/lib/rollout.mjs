@@ -43,6 +43,22 @@ const FLAGS = {
     // Flip only once every peer runs a build that reads the stamp; until then an
     // older peer ignores it and applies its own rule to the same ticket.
     stampBoardConfigOnWrite: false,
+
+    // apply accepts an encrypted op written under a superseded epoch, provided
+    // this device still holds a key that opens it and the op's writer is not one
+    // the committed timeline has removed.
+    //
+    // Today any op whose epoch tag != the current epoch is dropped, and the
+    // current epoch advances mid-loop when a re-key is reduced — so an innocent
+    // member's writes, made before it learned of a rotation, are discarded or not
+    // depending on linearization order.
+    //
+    // Refusing them does NOT protect confidentiality: the ciphertext is already
+    // on the wire and replicated, so a removed member holding the old key can
+    // read it whatever apply decides. The check only destroys data. The write
+    // side (refuseStaleEpochMutation) is what actually stops new stale-epoch
+    // writes.
+    acceptHeldEpochOps: false,
 }
 
 const flags = { ...FLAGS }
