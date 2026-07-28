@@ -155,6 +155,14 @@ let _tempPairing = null
 // Also syncs replicated items on each attempt so the guest sees the host's
 // list even before write access is confirmed.
 function cleanupTempSwarm() {
+    // DIAGNOSTIC (2026-07-28): this teardown lands immediately before the guest's
+    // main-swarm connections start dying silently at the idle timeout, so record
+    // what is actually being destroyed and what the main swarm holds at the time.
+    logger.log('[INFO] Temp swarm teardown', {
+        tempConnections: _tempSwarm?.connections?.size ?? null,
+        mainConnections: swarm?.connections?.size ?? null,
+        autobasePresent: !!autobase,
+    })
     if (_tempPairing) {
         try { _tempPairing.close() } catch (_) {}
         _tempPairing = null
@@ -874,7 +882,30 @@ export async function initAutobase(newBaseKey, options = {}) {
             if (autobase) {
                 const connectedBase = autobase
                 const startReplication = () => {
-                    if (!conn.destroyed && !connectedBase.closing) connectedBase.replicate(conn)
+                    // DIAGNOSTIC (2026-07-28): a guest's main-swarm connections
+                    // establish and then carry no data at all, dying at the ~13s
+                    // hyperswarm idle timeout over and over with view: 0, while
+                    // the same guest replicates fine over the pairing temp swarm.
+                    // Authorization is NOT the problem — the host logs "Added
+                    // writer from owner-signed membership op". So the question is
+                    // whether replicate() is reached here, and against which base.
+                    const skipped = conn.destroyed
+                        ? 'conn-destroyed'
+                        : connectedBase.closing ? 'base-closing' : null
+                    logger.log('[INFO] Replication attach', {
+                        skipped,
+                        sameBaseAsCurrent: connectedBase === autobase,
+                        baseKey: connectedBase.key ? b4a.toString(connectedBase.key, 'hex').slice(0, 8) : null,
+                        writable: !!connectedBase.writable,
+                        viewLength: connectedBase.view?.length ?? null,
+                    })
+                    if (skipped) return
+                    try {
+                        connectedBase.replicate(conn)
+                        logger.log('[INFO] Replication attached')
+                    } catch (e) {
+                        logger.log('[ERROR] Replication attach threw:', e?.message ?? e)
+                    }
                 }
                 if (epochResyncRecordMatchesMembership(_epochResyncRecord, membershipState)) {
                     // A peer may have upgraded since its previous connection and
