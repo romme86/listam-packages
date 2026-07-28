@@ -1,3 +1,4 @@
+import { createEpochKeyring } from './epoch-keyring.mjs'
 // Shared mutable state exports
 // All modules import from here and use setters to modify state
 
@@ -76,7 +77,21 @@ export function setBaseKey(val) { baseKey = val }
 export function setCurrentTopic(val) { currentTopic = val }
 export function setEncryptionKey(val) { encryptionKey = val }
 export function setOwnerAuthorityKeyPair(val) { ownerAuthorityKeyPair = val }
-export function setEpochKey(val) { epochKey = val }
+// Every epoch key this device holds, filed here because THIS is the choke point.
+//
+// The boot load and the membership-grant recovery both call setEpochKey
+// directly, so filing in a context wrapper missed them — and a device that boots
+// holding one epoch-3 key and then recovers a DIFFERENT one from a grant would
+// discard the first outright. Ops written under the superseded key then never
+// decrypt again. Observed live on the geekom peer 2026-07-28: loaded
+// fnv1a32:69d4a070, replaced it with fnv1a32:a0b24bf4, and immediately logged
+// "Could not decrypt encrypted list op for current epoch".
+export const epochKeyring = createEpochKeyring()
+
+export function setEpochKey(val) {
+    epochKey = val
+    if (val) epochKeyring.remember(val)
+}
 export function setEpochEncryptionKeyPair(val) { epochEncryptionKeyPair = val }
 export function setMembershipState(val) { membershipState = val }
 export function setBoardConfigState(val) { boardConfigState = val }

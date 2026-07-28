@@ -56,7 +56,8 @@ import { rolloutEnabled } from './lib/rollout.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
 import { createAnnouncementLog, committedItemIds } from './lib/announce.mjs'
-import { createEpochKeyring, resolveActiveEpochKey } from './lib/epoch-keyring.mjs'
+import { resolveActiveEpochKey } from './lib/epoch-keyring.mjs'
+import { epochKeyring as stateEpochKeyring } from './lib/state.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { buildSyncListPayload } from './lib/sync-list-payload.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
@@ -896,10 +897,14 @@ function broadcastBoardConfig(ctx = primaryContext) {
 // (incrementally; full re-scan only after an actual reorg).
 const applyMembershipCheckpoint = createViewCheckpoint()
 
-// What apply has told the frontend exists on the personal base, and every epoch
-// key it has held. Mirror the checkpoint above: per-context state apply owns.
+// What apply has told the frontend exists on the personal base. Mirrors the
+// checkpoint above: per-context state apply owns.
+//
+// The epoch keyring is NOT per-context here — it lives in state.mjs, because the
+// boot load and the grant recovery set the epoch key through that module
+// directly and would otherwise bypass any wrapper installed here.
 const primaryAnnouncementLog = createAnnouncementLog()
-const primaryEpochKeyring = createEpochKeyring()
+const primaryEpochKeyring = stateEpochKeyring
 
 export function resetApplyMembershipCheckpoint() {
     applyMembershipCheckpoint.reset()
@@ -923,11 +928,8 @@ export const primaryContext = {
     get currentList () { return currentList },
     setCurrentList,
     get epochKey () { return epochKey },
-    // Files every key into the keyring, exactly as a shared BaseContext does.
-    setEpochKey (v) {
-        setEpochKey(v)
-        if (v) primaryEpochKeyring.remember(v)
-    },
+    // setEpochKey files into the keyring itself — see lib/state.mjs.
+    setEpochKey,
     get epochEncryptionKeyPair () { return epochEncryptionKeyPair },
     get ownerAuthorityKeyPair () { return ownerAuthorityKeyPair },
     applyMembershipCheckpoint,
@@ -2065,11 +2067,30 @@ function unwrapListOperation(ctx, value, writerKeyHex) {
 
     if (opEpoch === currentEpoch) {
         const operation = decryptEncryptedListOperation(value, epochKeyForCurrentEpoch(ctx))
-        if (!operation) {
-            logger.log('[WARNING] Could not decrypt encrypted list op for current epoch')
-            return null
+        if (operation) return operation
+
+        // The epoch NUMBER matches and the key still does not open it: two
+        // branches each minted this epoch with different key material. Observed
+        // live, so this is not hypothetical — a peer booted holding one epoch-3
+        // key, recovered a different one from a persisted grant, and every op
+        // written under the first became permanently undecryptable. That is a
+        // silent per-writer stall, which is exactly what a reader sees as a
+        // "frozen" peer.
+        //
+        // Trying the other keys we hold costs an AEAD failure each and cannot
+        // admit anything forged: the epoch tag is authenticated associated data,
+        // so an op only opens under the key it was actually written with.
+        if (rolloutEnabled('acceptHeldEpochOps')) {
+            for (const key of ctx.epochKeyring?.keys?.() ?? []) {
+                const opened = decryptEncryptedListOperation(value, key)
+                if (opened) {
+                    logger.log('[WARNING] Decrypted a current-epoch op with a superseded key; this epoch was minted twice')
+                    return opened
+                }
+            }
         }
-        return operation
+        logger.log('[WARNING] Could not decrypt encrypted list op for current epoch')
+        return null
     }
 
     // Superseded epoch. Dropping it outright is what makes this verdict depend on

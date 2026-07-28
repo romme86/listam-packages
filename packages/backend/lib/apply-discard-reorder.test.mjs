@@ -1016,3 +1016,54 @@ test('CONVERGENCE: an ordinary pass with no reorg retracts nothing', async (t) =
     )
     assert.equal(ctx.announcementLog.has(first.id), true, 'the earlier row must still be announced')
 })
+
+// A forked epoch: two branches each mint the same epoch NUMBER with different key
+// material. Observed live on the geekom peer 2026-07-28 — it booted holding one
+// epoch-3 key, recovered a different one from a persisted membership grant, and
+// then logged "Could not decrypt encrypted list op for current epoch" for ops
+// written under the first. Those ops never decrypt again on that peer, which
+// reads exactly like the writer having frozen.
+test('FORKED EPOCH: an op written under a superseded key for the SAME epoch still opens', async (t) => {
+    setRolloutFlag('acceptHeldEpochOps', true)
+    t.after(() => resetRolloutFlags())
+
+    const { ctx, forkPoint } = await ownedBase(t)
+
+    // What the peer held first, and what it wrote under.
+    const supersededKey = ctx.epochKey
+    const row = item({ id: 'item-forked-epoch', text: 'Latte', listId: 'default', listType: 'shopping' })
+    const listOp = createListOperation('add', row, { listId: 'default', listType: 'shopping' })
+    const writtenUnderOld = createEncryptedListOperation(listOp, supersededKey, ctx.membershipState.currentEpoch)
+
+    // Then a DIFFERENT key arrives for the very same epoch and becomes active.
+    const rival = generateEpochKey()
+    ctx.setEpochKey(rival)
+    assert.notEqual(
+        Buffer.from(ctx.epochKey).toString('hex'), Buffer.from(supersededKey).toString('hex'),
+        'PRECONDITION: the active key must have been replaced',
+    )
+
+    const pass = await runPass(ctx, [writtenUnderOld], forkPoint)
+    assert.equal(
+        hasItemEntry(pass.appended, row.id),
+        true,
+        'an op written under the superseded key for this epoch must still be applied — otherwise the writer looks frozen',
+    )
+})
+
+test('FORKED EPOCH: an op under a key this device never held is still refused', async (t) => {
+    // Non-vacuity: the fallback tries keys we hold, it does not accept anything
+    // that merely claims the current epoch.
+    setRolloutFlag('acceptHeldEpochOps', true)
+    t.after(() => resetRolloutFlags())
+
+    const { ctx, forkPoint } = await ownedBase(t)
+    const row = item({ id: 'item-foreign-epoch', text: 'Latte', listId: 'default', listType: 'shopping' })
+    const foreign = createEncryptedListOperation(
+        createListOperation('add', row, { listId: 'default', listType: 'shopping' }),
+        generateEpochKey(),
+        ctx.membershipState.currentEpoch,
+    )
+    const pass = await runPass(ctx, [foreign], forkPoint)
+    assert.equal(hasItemEntry(pass.appended, row.id), false)
+})
