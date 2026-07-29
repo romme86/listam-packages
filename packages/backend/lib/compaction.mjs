@@ -52,6 +52,10 @@ export function createCompactionState() {
         snapshotDigest: null,
         // writerKeyHex -> highest superseded length
         clock: new Map(),
+        // The signed record itself, kept so the owner can hand it to a joiner in
+        // the invite. Reconstructing it is not possible — the signature covers
+        // fields the reduced state does not keep verbatim.
+        record: null,
         // Honouring is a LOCAL verdict, not part of the signed record: a peer
         // only skips history once it has confirmed it holds the snapshot that
         // replaces it. Until then the barrier is known but inert.
@@ -65,6 +69,7 @@ export function cloneCompactionState(state) {
         epoch: Number(state?.epoch) || 0,
         snapshotDigest: state?.snapshotDigest || null,
         clock: new Map(state?.clock || []),
+        record: state?.record || null,
         honoured: !!state?.honoured,
     }
 }
@@ -195,6 +200,7 @@ export function reduceCompactionOperation(record, state = createCompactionState(
     next.epoch = body.epoch
     next.snapshotDigest = body.snapshotDigest
     next.clock = new Map(body.clock.map((entry) => [entry.writerKey, entry.length]))
+    next.record = record
     // A newly reduced barrier starts inert. Only confirmSnapshot() below, once
     // the reduction actually matches the digest the owner signed, lets it
     // suppress anything.
@@ -223,6 +229,7 @@ export function seedCompactionBarrier(record) {
         epoch: body.epoch,
         snapshotDigest: body.snapshotDigest,
         clock: new Map(body.clock.map((entry) => [entry.writerKey, entry.length])),
+        record,
         honoured: true,
     }
 }

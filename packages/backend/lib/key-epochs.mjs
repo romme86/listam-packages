@@ -80,7 +80,16 @@ export function generateEpochKey() {
 // the candidate verifies the signature and surfaces it as `paired.data`.
 export const INVITE_EPOCH_DATA_VERSION = 1
 
-export function encodeInviteEpochData(epochKey, epoch) {
+// `barrier` is the committed compaction record, if the project has one.
+//
+// It rides here for the same reason the epoch key does: a guest needs both
+// BEFORE it opens the base. apply() is called per node, so a barrier the guest
+// only discovers in the log arrives long after the replay it was meant to avoid
+// — and the guest cannot verify an owner signature before replaying the very
+// membership records the barrier lets it skip. blind-pairing-core verifies this
+// whole payload against the invite key pair, which is the trust that makes both
+// fields usable that early.
+export function encodeInviteEpochData(epochKey, epoch, barrier = null) {
     const keyHex = normalizeHex(epochKey, EPOCH_KEY_BYTES)
     const epochNumber = Number(epoch)
     if (!keyHex || !Number.isInteger(epochNumber) || epochNumber <= 0) return null
@@ -88,6 +97,7 @@ export function encodeInviteEpochData(epochKey, epoch) {
         version: INVITE_EPOCH_DATA_VERSION,
         epochKey: keyHex,
         epoch: epochNumber,
+        ...(barrier ? { barrier } : {}),
     }))
 }
 
@@ -99,7 +109,9 @@ export function decodeInviteEpochData(data) {
         const epochKey = normalizeBuffer(parsed.epochKey, EPOCH_KEY_BYTES)
         const epoch = Number(parsed.epoch)
         if (!epochKey || !Number.isInteger(epoch) || epoch <= 0) return null
-        return { epochKey, epoch }
+        // An older host sends no barrier; the guest then simply replays, which
+        // is exactly the pre-compaction behaviour.
+        return { epochKey, epoch, barrier: parsed.barrier ?? null }
     } catch {
         return null
     }

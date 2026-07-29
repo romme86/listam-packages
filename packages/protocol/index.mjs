@@ -75,3 +75,13 @@ export const RPC_JOIN_LIST = 33
 // request/response; reply { ok, schedule }. The three cadences themselves are
 // fixed; this only toggles the whole schedule on or off.
 export const RPC_SET_BACKUP_SCHEDULE = 34
+
+// Owner-only: flatten history for everybody. Writes a full per-bucket snapshot
+// plus an owner-signed barrier, after which peers skip the superseded history
+// instead of replaying (and failing to decrypt) it. Empty request; reply
+// { ok, reason, sequence, buckets, items, readiness }.
+//
+// Readiness rides RPC_MESSAGE as { type: 'compaction-readiness', ... } so the UI
+// can explain WHICH device is holding the flatten back rather than just
+// disabling a button.
+export const RPC_COMPACT_HISTORY = 35

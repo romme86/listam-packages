@@ -29,6 +29,7 @@ import {
     RPC_RESTORE_BACKUP,
     RPC_SET_BACKUP_PASSWORD,
     RPC_SET_BACKUP_SCHEDULE,
+    RPC_COMPACT_HISTORY,
     RPC_SHARE_LIST,
     RPC_JOIN_LIST
 } from '@listam/protocol'
@@ -41,7 +42,7 @@ import {
     normalizeListOperation,
 } from './lib/list-reducer.mjs'
 import {loadAutobaseKey, saveAutobaseKey, loadEncryptionKey, saveEncryptionKey, loadOwnerAuthorityKey, saveOwnerAuthorityKey, deleteLegacyKeyFile, deleteLegacyInviteFile, loadEpochKey, saveEpochKey, deleteEpochKey, loadEpochEncryptionKey, saveEpochEncryptionKey} from "./lib/key.mjs"
-import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, resyncAuthorizedEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery} from "./lib/network.mjs"
+import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, resyncAuthorizedEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery, compactHistory, broadcastCompactionReadiness} from "./lib/network.mjs"
 import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { fence, clearFence } from './lib/fence.mjs'
@@ -665,6 +666,13 @@ async function handleFrontendRequest(req, error) {
                     startScheduledBackups()
                     return { ok: true, schedule: scheduleState() }
                 })
+                break
+            }
+
+            case RPC_COMPACT_HISTORY: {
+                logger.log('[INFO] Command RPC_COMPACT_HISTORY')
+                const result = await compactHistory({ trigger: 'manual' })
+                try { req.reply(JSON.stringify(result)) } catch { /* transport may not support replies */ }
                 break
             }
         }

@@ -33,3 +33,4 @@ export const RPC_SET_BACKUP_PASSWORD: 31
 export const RPC_SHARE_LIST: 32
 export const RPC_JOIN_LIST: 33
 export const RPC_SET_BACKUP_SCHEDULE: 34
+export const RPC_COMPACT_HISTORY: 35

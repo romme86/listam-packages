@@ -12,6 +12,9 @@ import { performMemberRemovalRekey } from "./rekey.mjs"
 import { epochResyncRecordMatchesMembership, performEpochResync } from './epoch-resync.mjs'
 import { createEpochGrantChannel } from './epoch-grant-channel.mjs'
 import { createJoinProgressDeadline } from './join-progress.mjs'
+import { performCompaction } from './compaction-writer.mjs'
+import { createCompactionState, seedCompactionBarrier } from './compaction.mjs'
+import { compactionReadiness, reducePresence } from '@listam/domain/presence'
 import { validateDirectEpochGrant } from './epoch-direct-adoption.mjs'
 import {
     buildMembershipRoster,
@@ -56,6 +59,7 @@ import {
     epochKey,
     epochEncryptionKeyPair,
     membershipState,
+    compactionState,
     pendingRecovery,
     setAutobase,
     setAddedStaticPeers,
@@ -73,6 +77,7 @@ import {
     setEpochKey,
     setEpochEncryptionKeyPair,
     setMembershipState,
+    setCompactionState,
     setPendingRecovery,
     isPendingJoinSuccess,
     setIsPendingJoinSuccess
@@ -390,7 +395,10 @@ export function createInvite() {
 
     // The epoch key rides in the invite's signed additional data because the
     // BlindPairing confirm payload cannot carry extra fields (see key-epochs).
-    const epochData = encodeInviteEpochData(epochKey, currentEpoch)
+    // The compaction barrier rides along for a different reason: the guest needs
+    // it before it opens the base, or it replays the history the barrier exists
+    // to let it skip.
+    const epochData = encodeInviteEpochData(epochKey, currentEpoch, compactionState?.record ?? null)
     if (!epochData) {
         logger.log('[WARNING] Invite creation rejected; no current epoch key to embed')
         return null
@@ -1248,6 +1256,20 @@ export async function joinViaInvite(z32InviteStr) {
             setEpochKey(inviteEpoch.epochKey)
             await saveEpochKey(inviteEpoch.epochKey)
             setEncryptionKey(result.encryptionKey)
+            // Adopt the host's compaction barrier BEFORE the base opens, so the
+            // first apply() batch already skips the superseded history instead
+            // of grinding through ops it holds no key for. An older host sends
+            // none, and the guest just replays as it always did.
+            const seededBarrier = inviteEpoch.barrier ? seedCompactionBarrier(inviteEpoch.barrier) : null
+            if (seededBarrier) {
+                setCompactionState(seededBarrier)
+                logger.log('[INFO] Adopted the host history-compaction barrier from the invite', {
+                    sequence: seededBarrier.sequence,
+                    epoch: seededBarrier.epoch,
+                })
+            } else {
+                setCompactionState(createCompactionState())
+            }
             await initAutobase(result.key, { allowOwnerMigration: false })
 
             // Commit the joined credentials NOW: the epoch keys are already
@@ -1360,11 +1382,69 @@ export async function removeMemberAndRotateEpoch(writerKey) {
         // The epoch rotated: any outstanding invite embeds the retired epoch
         // key in its signed additional data, so mint a fresh one.
         rotateInviteAndNotifyFrontend()
+        // A rotation is exactly the moment history gets expensive for future
+        // joiners: everything before it is now encrypted under a key an invite
+        // will not carry. Flatten it if the mesh is ready — best-effort, and
+        // never allowed to affect the removal's own success.
+        try {
+            await compactHistory({ trigger: 'rekey' })
+        } catch (e) {
+            logger.log('[WARNING] Post-rekey compaction failed; the removal stands', e)
+        }
     }
     broadcastMessage(result.ok
         ? { type: 'member-removed', writerKey: normalizeHex(writerKey, 32), snapshot: result.snapshot !== false }
         : { type: 'member-removal-failed', reason: result.reason })
     return result.ok
+}
+
+// Can every device in the project understand a compaction barrier?
+//
+// Derived from the synced presence channel, not from a build note — the
+// 2026-07-28 near-fork was a "mesh is ready" claim that was wrong about one
+// peer. A writer only counts as ready when it published its OWN heartbeat
+// saying so.
+export async function computeCompactionReadiness() {
+    try {
+        const presence = reducePresence(await rebuildAllItems())
+        return compactionReadiness(presence, membershipState?.writers)
+    } catch (e) {
+        logger.log('[WARNING] Could not compute compaction readiness', e)
+        return { ready: false, total: 0, readyCount: 0, blockers: [] }
+    }
+}
+
+export async function compactHistory({ trigger = 'manual' } = {}) {
+    const readiness = await computeCompactionReadiness()
+    const result = await performCompaction({
+        autobase,
+        ownerAuthorityKeyPair,
+        membershipState,
+        compactionState,
+        getAllItems: rebuildAllItems,
+        prepareListAppendOperation,
+        enqueueWrite,
+        readiness,
+        logger,
+    })
+
+    if (result.ok) {
+        // Every outstanding invite predates the barrier, so its bootstrap data
+        // would send a joiner into the history this just superseded.
+        rotateInviteAndNotifyFrontend()
+    }
+    if (trigger === 'manual') {
+        broadcastMessage({ type: 'compaction-result', ...result, readiness })
+    } else if (!result.ok) {
+        logger.log('[INFO] Automatic compaction skipped', { trigger, reason: result.reason })
+    }
+    return { ...result, readiness }
+}
+
+export async function broadcastCompactionReadiness() {
+    const readiness = await computeCompactionReadiness()
+    broadcastMessage({ type: 'compaction-readiness', ...readiness })
+    return readiness
 }
 
 export async function resyncAuthorizedEpoch() {
