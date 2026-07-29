@@ -6,6 +6,8 @@ import {
     createAddWriterMembershipRecord,
     reduceMembershipLog,
     buildMembershipRoster,
+    createMembershipState,
+    shouldAdoptBootMembership,
 } from './membership.mjs'
 
 const BASE_KEY = 'ab'.repeat(32)
@@ -61,4 +63,56 @@ test('joinedAt is null for a writer set with no recorded date (old-base toleranc
     const state = { writers: new Set([OWNER_WRITER]), ownerWriterKey: OWNER_WRITER }
     const roster = buildMembershipRoster(state, { localWriterKey: OWNER_WRITER, writable: true, hasOwnerAuthority: true })
     assert.equal(roster.writers[0].joinedAt, null)
+})
+
+test('a stale boot membership snapshot never replaces a reduced live state', () => {
+    // The 2026-07-29 Nothing Phone join: boot read the view of a freshly joined
+    // base while it was still empty, init continued without waiting, and apply()
+    // spent ~5 minutes reducing the real history into the live state. When the
+    // boot read finally resolved it carried the EMPTY snapshot — installing it
+    // wiped a complete roster and made the owner look absent.
+    const owner = createOwnerAuthorityKeyPair()
+    const live = reduceMembershipLog([
+        createOwnerBootstrapRecord({
+            ownerAuthorityKeyPair: owner, writerKey: OWNER_WRITER, baseKey: BASE_KEY, epoch: 1,
+        }),
+        createAddWriterMembershipRecord({
+            ownerAuthorityKeyPair: owner, writerKey: WRITER_B, baseKey: BASE_KEY, sequence: 2,
+        }),
+    ], { baseKey: BASE_KEY })
+
+    assert.ok(live.ownerAuthorityKey, 'precondition: the live state has an owner')
+    assert.equal(shouldAdoptBootMembership(live, createMembershipState()), false)
+})
+
+test('a cold boot with no live state adopts the boot snapshot', () => {
+    // The normal path this replay exists for: nothing has been reduced yet, so
+    // whatever the view holds is strictly better than an empty live state.
+    const owner = createOwnerAuthorityKeyPair()
+    const boot = reduceMembershipLog([
+        createOwnerBootstrapRecord({
+            ownerAuthorityKeyPair: owner, writerKey: OWNER_WRITER, baseKey: BASE_KEY, epoch: 1,
+        }),
+    ], { baseKey: BASE_KEY })
+
+    assert.equal(shouldAdoptBootMembership(createMembershipState(), boot), true)
+})
+
+test('a boot snapshot at or ahead of the live sequence is adopted', () => {
+    // Boot reading MORE than apply has reduced is the case the replay is for;
+    // equal sequences are the same state, so adopting is a no-op either way.
+    const owner = createOwnerAuthorityKeyPair()
+    const records = [
+        createOwnerBootstrapRecord({
+            ownerAuthorityKeyPair: owner, writerKey: OWNER_WRITER, baseKey: BASE_KEY, epoch: 1,
+        }),
+        createAddWriterMembershipRecord({
+            ownerAuthorityKeyPair: owner, writerKey: WRITER_B, baseKey: BASE_KEY, sequence: 2,
+        }),
+    ]
+    const live = reduceMembershipLog(records.slice(0, 1), { baseKey: BASE_KEY })
+    const ahead = reduceMembershipLog(records, { baseKey: BASE_KEY })
+
+    assert.equal(shouldAdoptBootMembership(live, ahead), true)
+    assert.equal(shouldAdoptBootMembership(live, live), true)
 })

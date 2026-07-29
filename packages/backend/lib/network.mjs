@@ -11,6 +11,7 @@ import { createAutoBackup } from "./auto-backup.mjs"
 import { performMemberRemovalRekey } from "./rekey.mjs"
 import { epochResyncRecordMatchesMembership, performEpochResync } from './epoch-resync.mjs'
 import { createEpochGrantChannel } from './epoch-grant-channel.mjs'
+import { createJoinProgressDeadline } from './join-progress.mjs'
 import { validateDirectEpochGrant } from './epoch-direct-adoption.mjs'
 import {
     buildMembershipRoster,
@@ -22,6 +23,7 @@ import {
     nextMembershipSequence,
     ownerAuthorityPublicKeyHex,
     reduceMembershipLog,
+    shouldAdoptBootMembership,
 } from "./membership.mjs"
 import { ownerRecoveryCodeFromKeyPair, recoverOwnerAuthorityFromCode } from "./owner-recovery.mjs"
 import {
@@ -187,7 +189,22 @@ function cleanupTempSwarm() {
 // A generation token guards every callback. A second join (or a base switch)
 // supersedes the first, and without it a late callback from the old attempt
 // could report success for a base that is no longer current.
-const JOIN_TIMEOUT_MS = 120_000
+// How long the watch tolerates seeing NO forward progress before giving up.
+//
+// This is deliberately not a wall-clock cap on the whole join. A guest joining a
+// base with a long history has to replay all of it through apply() before
+// Autobase settles and `writable` flips, and that replay is unbounded in the
+// size of the project: a phone joining a base that had rotated through seven
+// epochs ground for ~5 minutes at full CPU, because every op predating the
+// epoch it was granted fails to decrypt (one AEAD attempt per held key) before
+// being skipped. A fixed 120s cap reported failure while the backend was still
+// working, and the join then succeeded minutes later with the UI already showing
+// an error — see the 2026-07-29 Nothing Phone join.
+//
+// So the deadline is refreshed by evidence of progress (the linearized view
+// grew, or writability advanced a phase). It only fires when the guest is
+// genuinely stalled: nothing linearizing and no writability for this long.
+const JOIN_NO_PROGRESS_TIMEOUT_MS = 120_000
 const JOIN_FALLBACK_POLL_MS = 5000
 let _joinGeneration = 0
 let _joinDetach = null
@@ -206,7 +223,7 @@ function endJoinWatch() {
 function waitForWritable() {
     endJoinWatch()
     const gen = ++_joinGeneration
-    const deadline = Date.now() + JOIN_TIMEOUT_MS
+    const progress = createJoinProgressDeadline({ timeoutMs: JOIN_NO_PROGRESS_TIMEOUT_MS })
     // The view length is an exact, O(1) answer to "has anything new linearized?",
     // so the expensive rebuild+push only runs when there is genuinely more to
     // show — not on every wake-up.
@@ -257,6 +274,12 @@ function waitForWritable() {
                 cleanupTempSwarm()
             }
 
+            // Replaying a long history is progress even though nothing is
+            // writable yet: the view grows steadily while apply() works through
+            // it. Refresh the deadline so the watch waits out a slow catch-up
+            // and only gives up on a guest that has genuinely stopped moving.
+            progress.observeViewLength(autobase?.view?.length ?? 0)
+
             await syncWhatHasArrived()
             if (!current()) return
 
@@ -282,6 +305,7 @@ function waitForWritable() {
                 }
                 phase = 'syncing'
                 broadcastJoinPhase('syncing')
+                progress.noteProgress()
                 cleanupTempSwarm()
             }
 
@@ -291,19 +315,27 @@ function waitForWritable() {
                 return
             }
 
-            if (Date.now() >= deadline) {
+            if (progress.expired()) {
                 if (phase === 'syncing') {
                     // Writable but no peer yet: the join DID work, so report
                     // success rather than an error the user cannot act on.
                     logger.log('[INFO] Syncing phase timed out, but guest is writable — reporting success')
                     finish('success')
                 } else {
-                    logger.log('[ERROR] Timed out waiting for write access.', {
+                    // Pairing already succeeded, so the host DID hand over the
+                    // credentials and its write grant is on the base. What
+                    // stalled is this device applying it, so do not word this as
+                    // the host withholding permission — that sends the user to
+                    // audit a desktop that did nothing wrong.
+                    const stalledAtZero = (autobase?.view?.length ?? 0) === 0
+                    logger.log('[ERROR] Join stalled with no forward progress.', {
                         view: autobase?.view?.length ?? null,
                         mainSwarm: swarm?.connections?.size ?? null,
                         tempSwarm: _tempSwarm?.connections?.size ?? 0,
                     })
-                    finish('error', 'Timed out waiting for write access from host.')
+                    finish('error', stalledAtZero
+                        ? 'Paired, but no project data has arrived yet. Check the connection and try again.'
+                        : 'Paired, but syncing this project stalled before write access took effect. It may finish in the background — reopen the app shortly.')
                 }
             }
         } finally {
@@ -531,6 +563,19 @@ async function tearDownAutobaseSwarmStore() {
     }
 }
 
+// Install the membership state the boot tail reduced from the view, unless
+// apply() has already established a newer one (see shouldAdoptBootMembership).
+function adoptBootMembershipState(state) {
+    if (!shouldAdoptBootMembership(membershipState, state)) {
+        logger.log('[INFO] Boot membership snapshot is behind live apply state; keeping the live one', {
+            liveSequence: Number(membershipState?.highestSequence) || 0,
+            bootSequence: Number(state?.highestSequence) || 0,
+        })
+        return
+    }
+    setMembershipState(state)
+}
+
 async function ensureOwnerMembership({ allowOwnerMigration }) {
     if (membershipState.ownerAuthorityKey) {
         if (allowOwnerMigration && ownerAuthorityKeyPair) {
@@ -541,6 +586,16 @@ async function ensureOwnerMembership({ allowOwnerMigration }) {
 
     if (!allowOwnerMigration) {
         logger.log('[INFO] Owner membership migration skipped for joined base')
+        return
+    }
+    // A base reached through an invite has an owner by construction, even when
+    // this device has not replayed far enough to have seen the record yet.
+    // allowOwnerMigration only covers the join itself; a later RESTART of that
+    // same base re-enters here with the default (true), so without this the
+    // "no owner visible yet" window on every relaunch is enough to append a
+    // bootstrap record that can only ever be rejected.
+    if (_joinedBase) {
+        logger.log('[INFO] Owner membership migration skipped; this base was joined, not created here')
         return
     }
     if (!autobase?.writable || !autobase?.local?.key || !autobase?.key) {
@@ -770,7 +825,7 @@ export async function initAutobase(newBaseKey, options = {}) {
                 epochEncryptionKeyPair: activeEpochEncryptionKeyPair,
                 currentEpochKey: epochKey,
             })
-            setMembershipState(epochRecovery.state)
+            adoptBootMembershipState(epochRecovery.state)
             if (epochRecovery.recovered) {
                 setEpochKey(epochRecovery.epochKey)
                 await saveEpochKey(epochRecovery.epochKey)

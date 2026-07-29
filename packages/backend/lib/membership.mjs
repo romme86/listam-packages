@@ -83,6 +83,27 @@ export function nextMembershipSequence(state) {
     return Math.max(0, Number(state?.highestSequence) || 0) + 1
 }
 
+// Should the state reduced by the boot-time view replay replace the live one?
+//
+// Boot reduces membership from the persisted view, but on a freshly joined base
+// those reads block on blocks only peers hold, so init continues without them
+// and the replay finishes minutes later — by which time apply() has reduced the
+// real history into the live state. Installing the boot snapshot unconditionally
+// then overwrites a complete roster with the empty one boot saw, which also
+// makes the owner look absent and invites a doomed bootstrap append. Observed on
+// the 2026-07-29 Nothing Phone join, ~5 minutes after boot.
+//
+// The membership log's sequence is a high-water mark that only advances, so a
+// boot snapshot behind the live state is stale by definition. Adopt otherwise —
+// including when the live state has no owner yet, which is the normal cold boot
+// this replay exists to serve.
+export function shouldAdoptBootMembership(liveState, bootState) {
+    if (!liveState?.ownerAuthorityKey) return true
+    const liveSequence = Math.max(0, Number(liveState?.highestSequence) || 0)
+    const bootSequence = Math.max(0, Number(bootState?.highestSequence) || 0)
+    return bootSequence >= liveSequence
+}
+
 // Project the membership state into a roster for the frontend: the active
 // writers (owner first), which one is this device, the current epoch, and
 // whether the caller can administer (holds owner authority). Writer keys are
