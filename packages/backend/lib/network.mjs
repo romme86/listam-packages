@@ -1414,8 +1414,20 @@ export async function computeCompactionReadiness() {
     }
 }
 
-export async function compactHistory({ trigger = 'manual' } = {}) {
+export async function compactHistory({ trigger = 'manual', dryRun = false } = {}) {
     const readiness = await computeCompactionReadiness()
+    // The UI asks for readiness before it offers the button, so it can name the
+    // device holding the flatten back instead of just greying something out.
+    if (dryRun) {
+        return {
+            ok: false,
+            reason: 'dry-run',
+            dryRun: true,
+            canCompact: readiness.ready && canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair),
+            compacted: (Number(compactionState?.sequence) || 0) > 0,
+            readiness,
+        }
+    }
     const result = await performCompaction({
         autobase,
         ownerAuthorityKeyPair,

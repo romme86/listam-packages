@@ -78,10 +78,10 @@ export const RPC_SET_BACKUP_SCHEDULE = 34
 
 // Owner-only: flatten history for everybody. Writes a full per-bucket snapshot
 // plus an owner-signed barrier, after which peers skip the superseded history
-// instead of replaying (and failing to decrypt) it. Empty request; reply
-// { ok, reason, sequence, buckets, items, readiness }.
+// instead of replaying (and failing to decrypt) it.
 //
-// Readiness rides RPC_MESSAGE as { type: 'compaction-readiness', ... } so the UI
-// can explain WHICH device is holding the flatten back rather than just
-// disabling a button.
+// Request { dryRun } — dryRun reports readiness WITHOUT writing, so the UI can
+// name the device holding the flatten back rather than just greying a button
+// out. Reply { ok, reason, sequence, buckets, items, readiness }, where
+// readiness is { ready, total, readyCount, blockers[] }.
 export const RPC_COMPACT_HISTORY = 35

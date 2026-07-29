@@ -670,8 +670,9 @@ async function handleFrontendRequest(req, error) {
             }
 
             case RPC_COMPACT_HISTORY: {
-                logger.log('[INFO] Command RPC_COMPACT_HISTORY')
-                const result = await compactHistory({ trigger: 'manual' })
+                const data = parseRpcJson(req.data)
+                logger.log('[INFO] Command RPC_COMPACT_HISTORY', { dryRun: data?.dryRun === true })
+                const result = await compactHistory({ trigger: 'manual', dryRun: data?.dryRun === true })
                 try { req.reply(JSON.stringify(result)) } catch { /* transport may not support replies */ }
                 break
             }
