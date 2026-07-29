@@ -14,6 +14,7 @@
 import { createViewCheckpoint } from './view-checkpoint.mjs'
 import { createAnnouncementLog } from './announce.mjs'
 import { createEpochKeyring } from './epoch-keyring.mjs'
+import { createCompactionState } from './compaction.mjs'
 
 export function createBaseContext ({ role = 'shared', baseId = null, baseKey = null } = {}) {
     return {
@@ -25,6 +26,7 @@ export function createBaseContext ({ role = 'shared', baseId = null, baseKey = n
         // delegating to the state.mjs globals + the module-level checkpoint.)
         setMembershipState (v) { this.membershipState = v },
         setBoardConfigState (v) { this.boardConfigState = v },
+        setCompactionState (v) { this.compactionState = v },
         setCurrentList (v) { this.currentList = v },
         // Filing every key it is ever given is what makes the active key
         // reversible: a reorder that reinstates an earlier epoch finds the
@@ -72,6 +74,7 @@ export function createBaseContext ({ role = 'shared', baseId = null, baseKey = n
             removedWriters: new Map(),
         },
         boardConfigState: { highestSequence: 0, updatedAt: 0, config: null },
+        compactionState: createCompactionState(),
 
         // Blind pairing (per base)
         pairing: null,

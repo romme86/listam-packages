@@ -20,6 +20,7 @@ export function createViewCheckpoint() {
     let reduction = createListReduction()
     let membershipRecords = []
     let boardConfigRecords = []
+    let compactionRecords = []
     let processedLength = 0
     let lastEntryJson = null
 
@@ -27,6 +28,7 @@ export function createViewCheckpoint() {
         reduction = createListReduction()
         membershipRecords = []
         boardConfigRecords = []
+        compactionRecords = []
         processedLength = 0
         lastEntryJson = null
     }
@@ -55,6 +57,7 @@ export function createViewCheckpoint() {
                 allItems: reduction.allItems(),
                 membershipRecords: [...membershipRecords],
                 boardConfigRecords: [...boardConfigRecords],
+                compactionRecords: [...compactionRecords],
                 resumedFrom: processedLength,
                 scanned: 0,
             }
@@ -77,6 +80,8 @@ export function createViewCheckpoint() {
                 if (entry.record) membershipRecords.push(entry.record)
             } else if (entry && entry.op === 'board-config') {
                 if (entry.record) boardConfigRecords.push(entry.record)
+            } else if (entry && entry.op === 'compaction') {
+                if (entry.record) compactionRecords.push(entry.record)
             } else if (entry) {
                 reduction.applyEntry(entry)
             }
@@ -89,6 +94,7 @@ export function createViewCheckpoint() {
             allItems: reduction.allItems(),
             membershipRecords: [...membershipRecords],
             boardConfigRecords: [...boardConfigRecords],
+            compactionRecords: [...compactionRecords],
             resumedFrom: start,
             scanned,
         }

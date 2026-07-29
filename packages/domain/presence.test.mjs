@@ -5,6 +5,8 @@ import {
     PRESENCE_LIST_TYPE,
     PRESENCE_HEARTBEAT_MS,
     PRESENCE_ONLINE_THRESHOLD_MS,
+    COMPACTION_CAPABILITY,
+    compactionReadiness,
     isPresenceItem,
     buildAttestedPresenceItem,
     buildPresenceItem,
@@ -149,3 +151,55 @@ test('cadence + threshold constants are coherent (threshold safely exceeds caden
 function buildPeerLabelItemLike (writerKey) {
     return { id: writerKey, listId: '__peers__', listType: 'peer', text: 'name', isDone: false, timeOfCompletion: 0, updatedAt: 1, labelName: 'name' }
 }
+
+test('compactionReadiness: every writer self-reporting support is ready', () => {
+    const items = [
+        buildPresenceItem({ writerKey: 'aa', lastActiveAt: 10, compaction: COMPACTION_CAPABILITY }),
+        buildPresenceItem({ writerKey: 'bb', lastActiveAt: 20, compaction: COMPACTION_CAPABILITY }),
+    ]
+    const readiness = compactionReadiness(reducePresence(items), ['aa', 'bb'])
+    assert.equal(readiness.ready, true)
+    assert.equal(readiness.readyCount, 2)
+    assert.deepEqual(readiness.blockers, [])
+})
+
+test('compactionReadiness: a writer on an older build blocks the flatten', () => {
+    // The 2026-07-28 near-fork in one assertion: the mesh looked ready by note,
+    // and one peer was not.
+    const items = [
+        buildPresenceItem({ writerKey: 'aa', lastActiveAt: 10, compaction: COMPACTION_CAPABILITY }),
+        buildPresenceItem({ writerKey: 'bb', lastActiveAt: 20 }),
+    ]
+    const readiness = compactionReadiness(reducePresence(items), ['aa', 'bb'])
+    assert.equal(readiness.ready, false)
+    assert.equal(readiness.readyCount, 1)
+    assert.deepEqual(readiness.blockers, [{ writerKey: 'bb', reason: 'outdated' }])
+})
+
+test('compactionReadiness: a writer that never published presence blocks it', () => {
+    const items = [buildPresenceItem({ writerKey: 'aa', lastActiveAt: 10, compaction: COMPACTION_CAPABILITY })]
+    const readiness = compactionReadiness(reducePresence(items), ['aa', 'zz'])
+    assert.equal(readiness.ready, false)
+    assert.deepEqual(readiness.blockers, [{ writerKey: 'zz', reason: 'no-presence' }])
+})
+
+test('compactionReadiness: an owner-attested entry is never evidence of capability', () => {
+    // Attested entries exist precisely for devices too old to publish their own
+    // heartbeat, so the owner must not be able to vouch for support on their behalf.
+    const items = [
+        buildPresenceItem({ writerKey: 'aa', lastActiveAt: 10, compaction: COMPACTION_CAPABILITY }),
+        buildAttestedPresenceItem({ writerKey: 'bb', observedAt: 20, attestedBy: 'aa' }),
+    ]
+    const readiness = compactionReadiness(reducePresence(items), ['aa', 'bb'])
+    assert.equal(readiness.ready, false)
+    assert.deepEqual(readiness.blockers, [{ writerKey: 'bb', reason: 'attested' }])
+})
+
+test('compactionReadiness: an empty writer set is not readiness', () => {
+    assert.equal(compactionReadiness(new Map(), []).ready, false)
+})
+
+test('an older peer publishing no capability field reduces to 0, not undefined', () => {
+    const legacy = { id: 'aa', listId: PRESENCE_LIST_ID, listType: PRESENCE_LIST_TYPE, updatedAt: 5, lastActiveAt: 5 }
+    assert.equal(reducePresence([legacy]).get('aa').compaction, 0)
+})

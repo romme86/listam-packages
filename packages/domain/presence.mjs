@@ -52,6 +52,7 @@ export function buildPresenceItem ({
     sessionCount = 0,
     updatedAt,
     attestedBy = null,
+    compaction = 0,
 } = {}) {
     const key = String(writerKey ?? '')
     const active = numberOr(lastActiveAt, 0)
@@ -72,6 +73,12 @@ export function buildPresenceItem ({
         cumulativeOnlineMs: Math.max(0, numberOr(cumulativeOnlineMs, 0)),
         sessionCount: Math.max(0, numberOr(sessionCount, 0)),
         attestedBy: typeof attestedBy === 'string' && attestedBy ? attestedBy : null,
+        // What this build can do, so a mesh-wide decision can be made from
+        // OBSERVED fact instead of a judgement call. On 2026-07-28 a "mesh is
+        // ready" note was wrong and would have forked the base — the geekom read
+        // the rollout flag but had no keyring. An older peer simply has no such
+        // field, and absent reads as "not capable", which is the safe verdict.
+        compaction: Math.max(0, numberOr(compaction, 0)),
     }
 }
 
@@ -124,6 +131,7 @@ export function reducePresence (items) {
             sessionCount: Math.max(0, numberOr(item.sessionCount, 0)),
             updatedAt: at,
             attestedBy: typeof item.attestedBy === 'string' && item.attestedBy ? item.attestedBy : null,
+            compaction: Math.max(0, numberOr(item.compaction, 0)),
         })
     }
     return newest
@@ -137,6 +145,49 @@ export function isOnlineNow (entry, now, threshold = PRESENCE_ONLINE_THRESHOLD_M
     const last = numberOr(entry.lastActiveAt, 0)
     if (last <= 0) return false
     return (now - last) < threshold
+}
+
+// The compaction wire version this build understands. Bumping it re-gates the
+// owner's flatten action until every device advertises the new number.
+export const COMPACTION_CAPABILITY = 1
+
+// Can the owner safely flatten history for everybody yet?
+//
+// Compaction cannot fork a peer that ignores the barrier — it just reduces
+// everything and arrives at the same state. But that only holds while the
+// snapshot equals the reduction it replaces, so the owner is still making a
+// mesh-wide call, and this turns that call into an OBSERVED fact.
+//
+// `presenceByWriter` is reducePresence()'s Map; `writerKeys` is the active writer
+// set from the membership roster. A writer is ready only when it published its
+// OWN heartbeat saying so: an owner-attested entry means that device never spoke
+// for itself, so it can never be evidence about what it supports.
+export function compactionReadiness (presenceByWriter, writerKeys, required = COMPACTION_CAPABILITY) {
+    const keys = [...(writerKeys || [])].filter((key) => typeof key === 'string' && key)
+    const blockers = []
+
+    for (const writerKey of keys) {
+        const entry = presenceByWriter?.get?.(writerKey) || null
+        if (!entry) {
+            blockers.push({ writerKey, reason: 'no-presence' })
+            continue
+        }
+        if (entry.attestedBy) {
+            blockers.push({ writerKey, reason: 'attested' })
+            continue
+        }
+        if (numberOr(entry.compaction, 0) < required) {
+            blockers.push({ writerKey, reason: 'outdated' })
+        }
+    }
+
+    return {
+        // An empty writer set is not evidence of readiness.
+        ready: keys.length > 0 && blockers.length === 0,
+        total: keys.length,
+        readyCount: keys.length - blockers.length,
+        blockers,
+    }
 }
 
 // Average online session length in ms (cumulativeOnlineMs / sessionCount). 0 when

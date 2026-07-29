@@ -20,6 +20,7 @@ import {
     buildAttestedPresenceItem,
     buildPresenceItem,
     reducePresence,
+    COMPACTION_CAPABILITY,
     PRESENCE_HEARTBEAT_MS,
 } from '@listam/domain/presence'
 import { canCreateMembershipInvite } from './membership.mjs'
@@ -232,6 +233,9 @@ export async function writeHeartbeat ({ final = false } = {}) {
         cumulativeOnlineMs: _cumulativeOnlineMs,
         sessionCount: _sessionCount,
         updatedAt: now,
+        // Advertise what this build supports, so the owner's flatten action is
+        // gated on observed capability rather than on a note about the mesh.
+        compaction: COMPACTION_CAPABILITY,
     })
     const ok = await updateItem(item, null)
     if (ok) _lastWriteAt = now

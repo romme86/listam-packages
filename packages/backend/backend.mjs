@@ -51,6 +51,7 @@ import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.m
 import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet, startScheduledBackups, stopScheduledBackups, scheduleState, setScheduleEnabled } from './lib/auto-backup.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
+import { confirmSnapshot, isCompactionRecord, isNodeCovered, reduceCompactionLog, reduceCompactionOperation } from './lib/compaction.mjs'
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence, rigorAppliesToItem, configAsStamped } from './lib/board-config.mjs'
 import { rolloutEnabled } from './lib/rollout.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
@@ -82,6 +83,7 @@ import {
     epochEncryptionKeyPair,
     membershipState,
     boardConfigState,
+    compactionState,
     ownerAuthorityKeyPair,
     setRpc,
     setCurrentList,
@@ -89,6 +91,7 @@ import {
     setEncryptionKey,
     setMembershipState,
     setBoardConfigState,
+    setCompactionState,
     setOwnerAuthorityKeyPair,
     setEpochKey,
     setEpochEncryptionKeyPair
@@ -925,6 +928,8 @@ export const primaryContext = {
     setMembershipState,
     get boardConfigState () { return boardConfigState },
     setBoardConfigState,
+    get compactionState () { return compactionState },
+    setCompactionState,
     get currentList () { return currentList },
     setCurrentList,
     get epochKey () { return epochKey },
@@ -1664,14 +1669,26 @@ export async function apply (ctx, nodes, view, host) {
     // from it is incomplete. The reconciliation at the tail of this function
     // must not act on an incomplete set — see retractDiscardedAnnouncements.
     let viewReadFailed = false
-    const { membershipRecords, boardConfigRecords } = await ctx.applyMembershipCheckpoint.update(view, {
-        onError: () => { viewReadFailed = true },
-    })
+    const { membershipRecords, boardConfigRecords, compactionRecords, allItems: viewItems } =
+        await ctx.applyMembershipCheckpoint.update(view, {
+            onError: () => { viewReadFailed = true },
+        })
     ctx.setMembershipState(reduceMembershipLog(membershipRecords, { baseKey: ctx.autobase?.key }))
     ctx.setBoardConfigState(reduceBoardConfigLog(boardConfigRecords, {
         baseKey: ctx.autobase?.key,
         ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
     }))
+    // Fold any barrier the committed view already holds over whatever this
+    // device was seeded with (a fresh guest gets one from its invite, so it can
+    // skip history from the FIRST batch — apply is called per node, so a barrier
+    // discovered from the log alone would arrive long after the replay it was
+    // meant to avoid). Then confirm it against the reduction actually held: a
+    // barrier whose snapshot never landed must not suppress anything.
+    ctx.setCompactionState(reduceCompactionLog(compactionRecords, ctx.compactionState, {
+        baseKey: ctx.autobase?.key,
+        ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
+    }))
+    if (!viewReadFailed) ctx.setCompactionState(confirmSnapshot(ctx.compactionState, viewItems))
 
     // Board-config records this pass can resolve a stamp against: everything in
     // the committed view, plus anything accepted as the loop runs. A stamp only
@@ -1764,6 +1781,38 @@ export async function apply (ctx, nodes, view, host) {
             // the roster: it is a snapshot of state this pass may still lose.
             continue
         }
+
+        if (isCompactionRecord(value)) {
+            // Owner-signed history barrier. Persisted like the other control
+            // records so the verdict survives a restart, and deliberately NOT
+            // skippable below: a compacted peer still needs the full membership
+            // and barrier chain, which no snapshot carries.
+            const result = reduceCompactionOperation(value, ctx.compactionState, {
+                baseKey: ctx.autobase?.key,
+                ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
+            })
+            ctx.setCompactionState(result.state)
+            if (!result.ok) {
+                logger.log('[WARNING] Rejected compaction op', { reason: result.reason })
+                continue
+            }
+            await view.append({ op: 'compaction', record: value })
+            logger.log('[AUDIT] History compaction barrier committed', {
+                sequence: value.sequence,
+                epoch: value.epoch,
+            })
+            continue
+        }
+
+        // Superseded by the committed barrier: the snapshot that replaced this
+        // op is already in the view, so skip it WITHOUT decrypting. This is the
+        // entire point of compaction — on a base that has rotated N epochs, a
+        // guest holds one epoch key and every older op costs a failed AEAD
+        // attempt per held key before being dropped anyway.
+        //
+        // Coverage is by clock, so an op from a writer that had not yet seen the
+        // barrier is above it and still applies (see lib/compaction.mjs).
+        if (isNodeCovered(node, ctx.compactionState, nodeWriterKeyHex(node))) continue
 
         const unwrappedOperation = unwrapListOperation(ctx, value, nodeWriterKeyHex(node))
         if (!unwrappedOperation) continue

@@ -1,4 +1,5 @@
 import { createEpochKeyring } from './epoch-keyring.mjs'
+import { createCompactionState } from './compaction.mjs'
 // Shared mutable state exports
 // All modules import from here and use setters to modify state
 
@@ -34,6 +35,10 @@ export let membershipState = {
 // `config: null` until the first apply() pass populates it (callers fall back
 // to defaults). Not durable in memory — only the records in the view are.
 export let boardConfigState = { highestSequence: 0, updatedAt: 0, config: null }
+// The committed history-compaction barrier, if this timeline has one. Seeded
+// from an invite on a fresh join (see network.mjs) so a guest can skip the
+// history it is about to be handed a snapshot of, rather than replaying it.
+export let compactionState = createCompactionState()
 
 // Blind pairing
 export let pairing = null             // BlindPairing instance
@@ -95,6 +100,7 @@ export function setEpochKey(val) {
 export function setEpochEncryptionKeyPair(val) { epochEncryptionKeyPair = val }
 export function setMembershipState(val) { membershipState = val }
 export function setBoardConfigState(val) { boardConfigState = val }
+export function setCompactionState(val) { compactionState = val }
 export function setPairing(val) { pairing = val }
 export function setPairingMember(val) { pairingMember = val }
 export function setCurrentInvite(val) { currentInvite = val }
