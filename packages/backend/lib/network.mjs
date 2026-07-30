@@ -1402,12 +1402,17 @@ export async function removeMemberAndRotateEpoch(writerKey) {
 //
 // Derived from the synced presence channel, not from a build note — the
 // 2026-07-28 near-fork was a "mesh is ready" claim that was wrong about one
-// peer. A writer only counts as ready when it published its OWN heartbeat
-// saying so.
+// peer. A REMOTE writer only counts as ready when it published its OWN heartbeat
+// saying so. THIS device is passed separately: it is the build being asked, so
+// its capability is known rather than observed — and a host with presence writes
+// off (desktop) publishes no heartbeat at all, which used to make the owner count
+// itself among the devices holding its own flatten back.
 export async function computeCompactionReadiness() {
     try {
         const presence = reducePresence(await rebuildAllItems())
-        return compactionReadiness(presence, membershipState?.writers)
+        return compactionReadiness(presence, membershipState?.writers, {
+            localWriterKey: autobase?.local?.key ? autobase.local.key.toString('hex') : null,
+        })
     } catch (e) {
         logger.log('[WARNING] Could not compute compaction readiness', e)
         return { ready: false, total: 0, readyCount: 0, blockers: [] }

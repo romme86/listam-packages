@@ -199,6 +199,57 @@ test('compactionReadiness: an empty writer set is not readiness', () => {
     assert.equal(compactionReadiness(new Map(), []).ready, false)
 })
 
+test('compactionReadiness: THIS device counts as ready without a heartbeat of its own', () => {
+    // The bug this pins: desktop runs with `presenceWrites: false`, so it never
+    // publishes a presence item — and it was therefore counted as a blocker
+    // against its OWN flatten, forever. The owner's button could never enable, no
+    // matter how up to date every other device was. Capability of the build you
+    // are running inside is known, not observed.
+    const items = [buildPresenceItem({ writerKey: 'bb', lastActiveAt: 20, compaction: COMPACTION_CAPABILITY })]
+    const readiness = compactionReadiness(reducePresence(items), ['aa', 'bb'], { localWriterKey: 'aa' })
+    assert.equal(readiness.ready, true)
+    assert.equal(readiness.readyCount, 2)
+    assert.deepEqual(readiness.blockers, [])
+})
+
+test('compactionReadiness: knowing THIS device does not vouch for any other', () => {
+    // The whole point of the gate survives: only the local key is exempt.
+    const readiness = compactionReadiness(new Map(), ['aa', 'bb'], { localWriterKey: 'aa' })
+    assert.equal(readiness.ready, false)
+    assert.deepEqual(readiness.blockers, [{ writerKey: 'bb', reason: 'no-presence' }])
+    assert.equal(readiness.readyCount, 1)
+})
+
+test('compactionReadiness: a local key that is not a writer changes nothing', () => {
+    // Pre-join, or a stale key after a base switch: the exemption must not invent
+    // readiness for a device the roster does not list.
+    const readiness = compactionReadiness(new Map(), ['aa'], { localWriterKey: 'zz' })
+    assert.equal(readiness.total, 1)
+    assert.deepEqual(readiness.blockers, [{ writerKey: 'aa', reason: 'no-presence' }])
+})
+
+test('compactionReadiness: the bare-number `required` form still works', () => {
+    // One in-tree caller passed no options at all, but the signature was public.
+    const items = [buildPresenceItem({ writerKey: 'aa', lastActiveAt: 10, compaction: 1 })]
+    assert.equal(compactionReadiness(reducePresence(items), ['aa'], 1).ready, true)
+    assert.deepEqual(
+        compactionReadiness(reducePresence(items), ['aa'], 2).blockers,
+        [{ writerKey: 'aa', reason: 'outdated' }],
+        'a raised requirement must still re-gate every peer',
+    )
+})
+
+test('compactionReadiness: a raised requirement re-gates THIS device too', () => {
+    // Bumping COMPACTION_CAPABILITY is how a wire change is rolled out. The local
+    // exemption says "I am this build" — not "I satisfy any future requirement".
+    const readiness = compactionReadiness(new Map(), ['aa'], {
+        localWriterKey: 'aa',
+        required: COMPACTION_CAPABILITY + 1,
+    })
+    assert.equal(readiness.ready, false)
+    assert.deepEqual(readiness.blockers, [{ writerKey: 'aa', reason: 'no-presence' }])
+})
+
 test('an older peer publishing no capability field reduces to 0, not undefined', () => {
     const legacy = { id: 'aa', listId: PRESENCE_LIST_ID, listType: PRESENCE_LIST_TYPE, updatedAt: 5, lastActiveAt: 5 }
     assert.equal(reducePresence([legacy]).get('aa').compaction, 0)

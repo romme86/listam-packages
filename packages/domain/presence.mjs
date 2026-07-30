@@ -162,11 +162,26 @@ export const COMPACTION_CAPABILITY = 1
 // set from the membership roster. A writer is ready only when it published its
 // OWN heartbeat saying so: an owner-attested entry means that device never spoke
 // for itself, so it can never be evidence about what it supports.
-export function compactionReadiness (presenceByWriter, writerKeys, required = COMPACTION_CAPABILITY) {
+//
+// `options.localWriterKey` is the ONE exception, and it is not a loosening of the
+// rule — it is the rule applied honestly. The gate exists because a REMOTE
+// device's capability cannot be assumed; the local one does not need to be
+// assumed, because this function is running inside it. Without this, a host that
+// does not publish presence at all can never satisfy its own gate: desktop sets
+// `presenceWrites: false` (an Autobase append pending during boot replication
+// would occupy the user write queue), so the owner's Flatten button sat
+// permanently disabled, counting ITSELF as the device holding the mesh back.
+export function compactionReadiness (presenceByWriter, writerKeys, options = {}) {
+    const { required = COMPACTION_CAPABILITY, localWriterKey = null } = (
+        typeof options === 'number' ? { required: options } : (options || {})
+    )
+    const local = typeof localWriterKey === 'string' && localWriterKey ? localWriterKey : null
     const keys = [...(writerKeys || [])].filter((key) => typeof key === 'string' && key)
     const blockers = []
 
     for (const writerKey of keys) {
+        // Known, not observed: this build is the one being asked about.
+        if (local && writerKey === local && COMPACTION_CAPABILITY >= required) continue
         const entry = presenceByWriter?.get?.(writerKey) || null
         if (!entry) {
             blockers.push({ writerKey, reason: 'no-presence' })

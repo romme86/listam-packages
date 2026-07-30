@@ -50,5 +50,6 @@ export function averageOnlineMs (entry: PresenceEntry | null | undefined): numbe
 export function compactionReadiness (
     presenceByWriter: Map<string, PresenceEntry> | null | undefined,
     writerKeys: Iterable<string> | null | undefined,
-    required?: number,
+    // A bare number is the pre-options `required` form, still accepted.
+    options?: number | { required?: number, localWriterKey?: string | null },
 ): CompactionReadiness
