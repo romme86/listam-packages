@@ -85,3 +85,72 @@ export const RPC_SET_BACKUP_SCHEDULE = 34
 // out. Reply { ok, reason, sequence, buckets, items, readiness }, where
 // readiness is { ready, total, readyCount, blockers[] }.
 export const RPC_COMPACT_HISTORY = 35
+
+// QR invites use a non-routing URI rather than an app/web deep link. This is
+// deliberate: older Listam builds treat every deep-link invite as a destructive
+// whole-project join and cannot distinguish it from an additive single-list
+// join. A scanner must parse this envelope first and dispatch by `scope`.
+const INVITE_QR_PROTOCOL = 'listam-invite:'
+const INVITE_QR_HOST = 'v1'
+const INVITE_QR_SCOPES = new Set(['project', 'list'])
+const INVITE_QR_MAX_CODE_LENGTH = 2048
+
+function normalizeQrInviteCode (raw) {
+    if (typeof raw !== 'string') return ''
+    const normalized = raw.trim().replace(/\s+/g, '')
+    if (!normalized || normalized.length > INVITE_QR_MAX_CODE_LENGTH) return ''
+    // BlindPairing invites are z32 today. Keeping the envelope at the slightly
+    // broader alphanumeric boundary also supports test/dev invites and a future
+    // encoding revision without admitting URL/control delimiters into the code.
+    return /^[a-z0-9]+$/i.test(normalized) ? normalized : ''
+}
+
+/**
+ * Build the canonical payload rendered by project/list share QR codes.
+ *
+ * @param {string} invite
+ * @param {'project'|'list'} scope
+ * @returns {string}
+ */
+export function createInviteQrPayload (invite, scope) {
+    const normalizedInvite = normalizeQrInviteCode(invite)
+    if (!normalizedInvite) throw new TypeError('invite must be a non-empty alphanumeric code')
+    if (!INVITE_QR_SCOPES.has(scope)) throw new TypeError('scope must be "project" or "list"')
+    return `${INVITE_QR_PROTOCOL}//${INVITE_QR_HOST}/${scope}?invite=${encodeURIComponent(normalizedInvite)}`
+}
+
+/**
+ * Parse a QR payload created by createInviteQrPayload(). Unknown versions,
+ * scopes, extra/duplicate parameters, and malformed codes are rejected.
+ * Legacy raw invite codes intentionally return null; callers may accept those
+ * separately in an explicitly selected project/list join flow.
+ *
+ * @param {unknown} raw
+ * @returns {{ version: 1, scope: 'project'|'list', invite: string } | null}
+ */
+export function parseInviteQrPayload (raw) {
+    if (typeof raw !== 'string') return null
+    const trimmed = raw.trim()
+    if (!trimmed) return null
+
+    let url
+    try {
+        url = new URL(trimmed)
+    } catch {
+        return null
+    }
+
+    if (url.protocol.toLowerCase() !== INVITE_QR_PROTOCOL) return null
+    if (url.hostname.toLowerCase() !== INVITE_QR_HOST) return null
+    if (url.username || url.password || url.port || url.hash) return null
+
+    const scope = url.pathname.startsWith('/') ? url.pathname.slice(1) : url.pathname
+    if (!INVITE_QR_SCOPES.has(scope)) return null
+
+    const params = [...url.searchParams.entries()]
+    if (params.length !== 1 || params[0][0] !== 'invite') return null
+    const invite = normalizeQrInviteCode(params[0][1])
+    if (!invite) return null
+
+    return { version: 1, scope, invite }
+}

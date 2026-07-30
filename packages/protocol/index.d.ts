@@ -34,3 +34,14 @@ export const RPC_SHARE_LIST: 32
 export const RPC_JOIN_LIST: 33
 export const RPC_SET_BACKUP_SCHEDULE: 34
 export const RPC_COMPACT_HISTORY: 35
+
+export type InviteQrScope = 'project' | 'list'
+
+export type InviteQrPayload = {
+    version: 1
+    scope: InviteQrScope
+    invite: string
+}
+
+export function createInviteQrPayload(invite: string, scope: InviteQrScope): string
+export function parseInviteQrPayload(raw: unknown): InviteQrPayload | null
