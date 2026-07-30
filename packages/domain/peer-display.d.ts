@@ -13,6 +13,13 @@ export declare function formatAgo(ms: number): string
 /** Accumulated online time with no words: '2d 4h', '3h 5m', '12m'. */
 export declare function formatUptime(ms: number): string
 
+/** The running device is online by definition; remote devices use heartbeat freshness. */
+export declare function isDeviceOnline(input?: {
+    isSelf?: boolean
+    presence?: { lastActiveAt?: number } | null
+    now?: number
+}): boolean
+
 export interface PeerDisplayInput {
     key?: string
     name?: string

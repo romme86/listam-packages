@@ -11,6 +11,7 @@ import {
     shortKey,
     formatAgo,
     formatUptime,
+    isDeviceOnline,
     resolvePeerDisplay,
     presenceStatusVerdict,
 } from './peer-display.mjs'
@@ -79,6 +80,15 @@ test('formatUptime floors into d/h/m and drops empty leading units', () => {
 test('formatAgo rounds where formatUptime floors', () => {
     assert.equal(formatAgo(59.6 * 60_000), '1h')
     assert.equal(formatUptime(59.6 * 60_000), '59m')
+})
+
+test('isDeviceOnline always presents self as online and keeps heartbeat rules for peers', () => {
+    const now = 1_000_000_000
+    assert.equal(isDeviceOnline({ isSelf: true, presence: null, now }), true)
+    assert.equal(isDeviceOnline({ isSelf: true, presence: { lastActiveAt: 1 }, now }), true)
+    assert.equal(isDeviceOnline({ isSelf: false, presence: null, now }), false)
+    assert.equal(isDeviceOnline({ presence: { lastActiveAt: now - 1000 }, now }), true)
+    assert.equal(isDeviceOnline({ presence: { lastActiveAt: 1 }, now }), false)
 })
 
 test('resolvePeerDisplay shows a name when there is one', () => {

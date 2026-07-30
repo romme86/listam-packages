@@ -15,6 +15,8 @@
 // formatters are deliberately language-neutral ("3h", "2d 4h") — they carry no
 // words, so only the label around them needs translating.
 
+import { isOnlineNow } from './presence.mjs'
+
 /** First two alphanumerics of a value, uppercased. `'a1b2…'` -> `'A1'`. */
 export function ticketInitials (value) {
     const s = String(value || '').replace(/[^a-z0-9]/gi, '')
@@ -57,6 +59,19 @@ export function formatUptime (ms) {
     if (days > 0) return `${days}d ${hrs}h`
     if (hrs > 0) return `${hrs}h ${mins}m`
     return `${mins}m`
+}
+
+/**
+ * Whether a roster device should be presented as online in the running app.
+ *
+ * The local device is known to be active because it is rendering the current
+ * screen, so it must not depend on receiving its own replicated heartbeat.
+ * Remote devices still use the normal presence staleness threshold.
+ *
+ * @param {{ isSelf?: boolean, presence?: object | null, now?: number }} input
+ */
+export function isDeviceOnline ({ isSelf = false, presence = null, now = Date.now() } = {}) {
+    return !!isSelf || isOnlineNow(presence, now)
 }
 
 /**
