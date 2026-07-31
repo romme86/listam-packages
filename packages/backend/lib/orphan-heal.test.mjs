@@ -28,6 +28,26 @@ test('plans a heal for a fully-orphaned, all-tombstoned shared list', () => {
     assert.equal(plans[0].items[0].text, 'Pollo')
 })
 
+test('re-ID promotion heals from its explicit source bucket and filters sibling surfaces', () => {
+    const plans = planOrphanedListHeals(baseInputs({
+        lists: [{ id: 'list-shared', name: 'Groceries', type: 'shopping', baseKey: 'e2cf' }],
+        sourceForBase: (key) => key === 'e2cf'
+            ? { sourceListId: 'default', sourceListType: 'shopping' }
+            : null,
+        tombstoned: (id) => id === 'default' ? [
+            { id: 'g', listId: 'default', listType: 'shopping', text: 'Pollo' },
+            { id: 'legacy', listId: 'default', text: 'Pane' },
+            { id: 't', listId: 'default', listType: 'todo', text: 'Call mum' },
+        ] : [],
+    }))
+
+    assert.equal(plans.length, 1)
+    assert.equal(plans[0].listId, 'list-shared')
+    assert.equal(plans[0].sourceListId, 'default')
+    assert.equal(plans[0].sourceListType, 'shopping')
+    assert.deepEqual(plans[0].items.map((item) => item.id), ['g', 'legacy'])
+})
+
 test('skips a list with no shared baseKey (a normal personal list)', () => {
     const plans = planOrphanedListHeals(baseInputs({ lists: [{ id: 'default', name: 'x', type: 'shopping', baseKey: null }] }))
     assert.equal(plans.length, 0)

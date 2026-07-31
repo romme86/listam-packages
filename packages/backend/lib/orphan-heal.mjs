@@ -12,6 +12,7 @@
 // This module is PURE: callers pass plain data + predicate callbacks, so the
 // decision logic is fully unit-testable without a live Autobase. The thin
 // backend wrapper supplies the live inputs and applies the returned plans.
+import { normalizeListType } from '@listam/domain/identity'
 
 // Decide which orphaned shared lists to heal and which items to resurrect.
 //
@@ -22,6 +23,8 @@
 //   isHealed     (baseKey) => boolean   already healed (device-local marker)
 //   liveCount    (listId)  => number    live (non-tombstoned) items for the list
 //   tombstoned   (listId)  => item[]    recoverable tombstoned items for the list
+//   sourceForBase(baseKey) => { sourceListId, sourceListType } | null
+//                                  optional re-ID promotion origin metadata
 //
 // A list is healed ONLY when ALL hold, so a healthy or in-flight-join list is
 // never touched:
@@ -39,17 +42,33 @@ export function planOrphanedListHeals ({
     isHealed,
     liveCount,
     tombstoned,
+    sourceForBase = () => null,
 }) {
     const plans = []
     for (const l of Array.isArray(lists) ? lists : []) {
         if (!l || typeof l.id !== 'string' || !l.baseKey) continue
         if (isBaseOpen(l.baseKey) || hasCreds(l.baseKey) || hasLocalDir(l.baseKey) || isHealed(l.baseKey)) continue
         if (liveCount(l.id) > 0) continue
-        const items = (tombstoned(l.id) || []).filter(
-            (it) => it && typeof it.id === 'string' && it.id && typeof it.text === 'string',
+        const source = sourceForBase(l.baseKey)
+        const sourceListId = typeof source?.sourceListId === 'string' && source.sourceListId
+            ? source.sourceListId
+            : l.id
+        const sourceListType = typeof source?.sourceListType === 'string' && source.sourceListType
+            ? source.sourceListType
+            : null
+        const items = (tombstoned(sourceListId) || []).filter(
+            (it) => it && typeof it.id === 'string' && it.id && typeof it.text === 'string'
+                && (!sourceListType || normalizeListType(it.listType) === sourceListType),
         )
         if (items.length === 0) continue
-        plans.push({ listId: l.id, baseKey: l.baseKey, list: l, items })
+        plans.push({
+            listId: l.id,
+            baseKey: l.baseKey,
+            list: l,
+            items,
+            sourceListId,
+            sourceListType,
+        })
     }
     return plans
 }

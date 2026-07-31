@@ -1,5 +1,5 @@
-// Two synced "label" channels that ride the ordinary item pipeline exactly like
-// the list registry (list-registry.mjs): reserved listId/listType buckets whose
+// Synced surface/device metadata channels that ride the ordinary item pipeline
+// exactly like the list registry (list-registry.mjs): reserved listId/listType buckets whose
 // items carry the full base item shape — `text` string, `isDone:false`,
 // `timeOfCompletion:0` — so an older peer's strict normalizeListItem accepts and
 // stores them, plus a `labelName` field. A brand-new listType hits no existing
@@ -20,6 +20,9 @@
 //    builtinGroups), so a fresh device never saw the placement; this channel
 //    replicates it. Same surface key as the rename channel; the *value* is the
 //    target groupId (parked in labelName). LWW by updatedAt.
+//  • BUILTIN-VISIBILITY records: whether a built-in surface was deleted/hidden.
+//    A later (or same-timestamp) live item on that surface resurrects it, so an
+//    implicit add can never leave newly-created content stranded off-screen.
 //
 // Empty name = cleared: the peer label disappears / the built-in reverts to its
 // localized default. The reducers drop a newest-but-empty entry so a clear
@@ -29,6 +32,8 @@
 // it in below so every projection/nav/stray-list gate that already calls isLabelItem
 // skips presence too. One-directional: presence.mjs must NOT import labels.mjs.
 import { isPresenceItem } from './presence.mjs'
+import { BOARD_LIST_TYPE, isBoardType } from './board.mjs'
+import { DEFAULT_LIST_TYPE, TODO_LIST_TYPE, isTodoType } from './identity.mjs'
 
 export const PEER_LABEL_LIST_ID = '__peers__'
 export const PEER_LABEL_LIST_TYPE = 'peer'
@@ -36,6 +41,8 @@ export const SURFACE_LABEL_LIST_ID = '__surfacenames__'
 export const SURFACE_LABEL_LIST_TYPE = 'surfacename'
 export const BUILTIN_GROUP_LIST_ID = '__builtingroups__'
 export const BUILTIN_GROUP_LIST_TYPE = 'builtingroup'
+export const BUILTIN_VISIBILITY_LIST_ID = '__builtinvisibility__'
+export const BUILTIN_VISIBILITY_LIST_TYPE = 'builtinvisibility'
 // VALUE-RETURN labels: whether a surface has the optional "value return" property
 // enabled (each item must be rated 1-10 value + 1-10 time-delay). Keyed by the
 // same surface key as the rename/group channels so it works for built-in surfaces
@@ -59,6 +66,10 @@ export function isBuiltinGroupItem (item) {
     return !!item && typeof item === 'object' && item.listType === BUILTIN_GROUP_LIST_TYPE
 }
 
+export function isBuiltinVisibilityItem (item) {
+    return !!item && typeof item === 'object' && item.listType === BUILTIN_VISIBILITY_LIST_TYPE
+}
+
 export function isValueReturnItem (item) {
     return !!item && typeof item === 'object' && item.listType === VALUE_RETURN_LIST_TYPE
 }
@@ -70,7 +81,7 @@ export function isValueReturnItem (item) {
 // so each predicate stays single-purpose.
 export function isLabelItem (item) {
     return isPeerLabelItem(item) || isSurfaceLabelItem(item) || isBuiltinGroupItem(item)
-        || isValueReturnItem(item) || isPresenceItem(item)
+        || isBuiltinVisibilityItem(item) || isValueReturnItem(item) || isPresenceItem(item)
 }
 
 function numberOr (value, fallback) {
@@ -89,6 +100,15 @@ export function surfaceLabelKey (listId, type) {
     const lid = typeof listId === 'string' && listId ? listId : ''
     const t = typeof type === 'string' ? type : ''
     return `${lid}:${t}`
+}
+
+// Built-in Board dual-reads the legacy `kanban` wire value; grocery is the
+// fallback surface for every non-board/non-todo type. Folding here mirrors the
+// clients' surface predicates and keeps the visibility key canonical.
+function canonicalBuiltinType (type) {
+    if (isBoardType(type)) return BOARD_LIST_TYPE
+    if (isTodoType(type)) return TODO_LIST_TYPE
+    return DEFAULT_LIST_TYPE
 }
 
 function baseLabelItem ({ id, listId, listType, name, updatedAt }) {
@@ -131,6 +151,31 @@ export function buildSurfaceLabelItem ({ listId, type, name, updatedAt }) {
 export function buildBuiltinGroupItem ({ listId, type, groupId, updatedAt }) {
     const key = surfaceLabelKey(listId, type)
     return { ...baseLabelItem({ id: key, listId: BUILTIN_GROUP_LIST_ID, listType: BUILTIN_GROUP_LIST_TYPE, name: groupId, updatedAt }), surfaceKey: key }
+}
+
+// Build the synced lifecycle record for a built-in surface. `hidden:true`
+// means the user deleted the surface; `hidden:false` explicitly restores it.
+// The source coordinates are carried separately because parsing a composite
+// key is needlessly fragile and the visibility reducer must compare live rows
+// on exactly this surface.
+export function buildBuiltinVisibilityItem ({ listId, type, hidden, updatedAt }) {
+    const surfaceListId = typeof listId === 'string' ? listId : ''
+    const surfaceType = canonicalBuiltinType(type)
+    const key = surfaceLabelKey(surfaceListId, surfaceType)
+    const builtinHidden = hidden === true
+    return {
+        ...baseLabelItem({
+            id: key,
+            listId: BUILTIN_VISIBILITY_LIST_ID,
+            listType: BUILTIN_VISIBILITY_LIST_TYPE,
+            name: builtinHidden ? '1' : '',
+            updatedAt,
+        }),
+        surfaceKey: key,
+        surfaceListId,
+        surfaceType,
+        builtinHidden,
+    }
 }
 
 // Build the synced item that toggles the value-return property for a surface.
@@ -177,6 +222,58 @@ export function reduceSurfaceLabels (items) {
 // falls back to its general/ungrouped group.
 export function reduceBuiltinGroups (items) {
     return reduceLabels(items, isBuiltinGroupItem)
+}
+
+// Set<surfaceKey> for built-in surfaces whose latest lifecycle record hides
+// them and which have not subsequently received live content. Content wins on
+// equal timestamps as well as newer ones: clocks are only millisecond-granular,
+// and visibility must fail open so a successful add is never invisible.
+export function reduceHiddenBuiltinSurfaces (items) {
+    const rows = Array.isArray(items) ? items : []
+    const newestVisibility = new Map() // surfaceKey -> { hidden, at }
+
+    for (const item of rows) {
+        if (!isBuiltinVisibilityItem(item)) continue
+        const surfaceListId = typeof item.surfaceListId === 'string' ? item.surfaceListId : ''
+        const surfaceType = canonicalBuiltinType(item.surfaceType)
+        if (!surfaceListId) continue
+        const key = surfaceLabelKey(surfaceListId, surfaceType)
+        const at = numberOr(item.updatedAt, 0)
+        const prev = newestVisibility.get(key)
+        if (prev && prev.at >= at) continue
+        const hidden = typeof item.builtinHidden === 'boolean'
+            ? item.builtinHidden
+            : cleanLabelName(typeof item.labelName === 'string' ? item.labelName : item.text) === '1'
+        newestVisibility.set(key, { hidden, at })
+    }
+
+    // Latest live content timestamp per built-in surface. Delete-shaped rows do
+    // not resurrect a surface when callers defensively reduce a raw operation
+    // stream instead of the already-materialized item set.
+    const newestContentAt = new Map()
+    for (const item of rows) {
+        if (!item || typeof item !== 'object' || isBuiltinVisibilityItem(item)) continue
+        if (item.op === 'delete' || item.deleted === true || item.regDeleted === true) continue
+        if (typeof item.listId !== 'string' || !item.listId) continue
+        const key = surfaceLabelKey(item.listId, canonicalBuiltinType(item.listType))
+        const at = numberOr(item.updatedAt, 0)
+        const prev = newestContentAt.get(key)
+        if (prev == null || at > prev) newestContentAt.set(key, at)
+    }
+
+    const hidden = new Set()
+    for (const [key, state] of newestVisibility) {
+        if (!state.hidden) continue
+        const contentAt = newestContentAt.get(key)
+        if (contentAt == null || contentAt < state.at) hidden.add(key)
+    }
+    return hidden
+}
+
+export function isBuiltinSurfaceHidden (items, listId, type) {
+    return reduceHiddenBuiltinSurfaces(items).has(
+        surfaceLabelKey(typeof listId === 'string' ? listId : '', canonicalBuiltinType(type)),
+    )
 }
 
 // Map<surfaceKey, true> of surfaces that have value-return enabled. An empty

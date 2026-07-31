@@ -67,8 +67,11 @@ import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairi
 import { reduceRegistry, isRegistryItem, REG_KIND_LIST, buildListMetaItem } from './lib/list-registry.mjs'
 import { planOrphanedListHeals, tombstonedFromLog } from './lib/orphan-heal.mjs'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE } from '@listam/domain/identity'
+import { buildBuiltinVisibilityItem } from '@listam/domain/labels'
 import { isPresenceItem } from '@listam/domain/presence'
 import { isInternalChannelItem, buildSharedCredItem, reduceSharedCreds, buildSharedJoinReqItem, reduceSharedJoinReqs } from './lib/shared-creds.mjs'
+import { buildSharedSourceItem, reduceSharedSources } from './lib/shared-source.mjs'
+import { buildDefaultPlanMigrations, promotedDefaultListId, shapeDefaultPromotionItems } from './lib/share-promotion.mjs'
 import { removeWriterAtConsensus } from './lib/writer-removal.mjs'
 import { decryptEncryptedListOperation, decryptEpochGrantForWriter, epochKeyHashHex, epochPublicKeyHex, isEncryptedListOperation } from './lib/key-epochs.mjs'
 import {
@@ -444,7 +447,7 @@ async function handleFrontendRequest(req, error) {
             case RPC_SHARE_LIST: {
                 logger.log('[INFO] Command RPC_SHARE_LIST')
                 const data = parseRpcJson(req.data) || {}
-                const result = await shareList(data.listId)
+                const result = await shareList(data.listId, data.type ?? data.listType, data.name)
                 if (typeof req?.reply === 'function') {
                     try { req.reply(JSON.stringify(result)) } catch (e) { logger.log('[ERROR] reply share-list:', e) }
                 }
@@ -1313,6 +1316,7 @@ export async function healOrphanedSharedLists () {
     try {
         const all = await rebuildAllItems()
         const registry = reduceRegistry(all)
+        const sharedSources = reduceSharedSources(all)
         const healed = loadHealedOrphans()
         const localDirs = loadSharedIndex()
         const liveByList = new Map()
@@ -1346,6 +1350,7 @@ export async function healOrphanedSharedLists () {
             isHealed: (k) => healed.has(k),
             liveCount: (id) => liveByList.get(id) || 0,
             tombstoned: (id) => [...(tomb.get(id)?.values() ?? [])],
+            sourceForBase: (baseKey) => sharedSources.get(baseKey) ?? null,
         })
         if (plans.length === 0) return
 
@@ -1380,7 +1385,12 @@ export async function healOrphanedSharedLists () {
             let restored = 0
             if (ok) {
                 for (const item of plan.items) {
-                    if (await updateItem({ ...item, listId: plan.list.id, updatedAt: ++stamp })) restored++
+                    if (await updateItem({
+                        ...item,
+                        listId: plan.list.id,
+                        listType: plan.list.type || item.listType || DEFAULT_LIST_TYPE,
+                        updatedAt: ++stamp,
+                    })) restored++
                     else { ok = false; break }
                 }
             }
@@ -1482,34 +1492,46 @@ function resolveWriteContext (payload) {
 }
 
 // Promote a personal list into its OWN shared base and mint a co-edit invite.
-// Items are re-seeded into the new base (identity preserved), the personal
-// copies are tombstoned, and the personal registry entry is pointed at the new
-// base (regBaseKey) so this device — and the UI — route the list there.
-async function shareList (listId) {
+// Items are re-seeded into the new base, the personal copies are tombstoned,
+// and the personal registry entry is pointed at the new base (regBaseKey) so
+// this device — and the UI — route the list there. Named ids are preserved;
+// literal-default groceries are re-IDed to avoid recipient collisions.
+async function shareList (listId, requestedType = null, requestedName = null) {
     if (!baseManager) return { ok: false, reason: 'not-ready' }
     if (!autobase || !autobase.writable) return { ok: false, reason: 'not-writable' }
     if (typeof listId !== 'string' || !listId) return { ok: false, reason: 'bad-list' }
-    // The built-in Groceries/Board/Todo surfaces are multiplexed onto the single
-    // reserved listId 'default' (differentiated only by listType). Sharing by
-    // listId would sweep ALL THREE surfaces' items into one shared base and
-    // tombstone the personal copies — silently emptying the other two (and, if
-    // that base is later unreachable, stranding every item). Refuse it; only
-    // registry-backed named lists (each with its own listId) can be shared.
-    if (listId === DEFAULT_LIST_ID) return { ok: false, reason: 'cannot-share-builtin' }
+    const isDefaultSource = listId === DEFAULT_LIST_ID
+    const sourceType = typeof requestedType === 'string' && requestedType ? requestedType : DEFAULT_LIST_TYPE
+    // Only the literal default GROCERY is promotable. Historical Board/To-do
+    // surfaces may still share the same physical bucket; selecting by listId
+    // alone would sweep them into the grocery base and delete their originals.
+    if (isDefaultSource && sourceType !== DEFAULT_LIST_TYPE) {
+        return { ok: false, reason: 'cannot-share-builtin' }
+    }
 
     // Already shared → return a fresh invite from the open base.
     if (_listIdToBaseKey.has(listId)) {
         const existing = baseManager.get(_listIdToBaseKey.get(listId))
-        if (existing) return { ok: true, invite: createSharedInvite(existing), baseKey: existing.baseId }
+        if (existing) return { ok: true, invite: createSharedInvite(existing), baseKey: existing.baseId, listId }
     }
 
     const all = await rebuildAllItems()
-    const items = all.filter((i) => i && i.listId === listId && !isRegistryItem(i))
+    const items = isDefaultSource
+        ? shapeDefaultPromotionItems(all, {
+            sourceListId: DEFAULT_LIST_ID,
+            sourceListType: DEFAULT_LIST_TYPE,
+            targetListId: DEFAULT_LIST_ID,
+        }).source
+        : all.filter((i) => i && i.listId === listId && !isRegistryItem(i))
     const meta = all.find((i) => isRegistryItem(i) && i.regKind === REG_KIND_LIST && i.id === listId)
-    if (items.length === 0 && !meta) return { ok: false, reason: 'empty-list' }
+    // The default grocery has no registry descriptor of its own, but sharing an
+    // empty list is still useful: its seeded self-meta lets recipients mount it.
+    if (items.length === 0 && !meta && !isDefaultSource) return { ok: false, reason: 'empty-list' }
 
-    const listType = meta?.regType || items[0]?.listType || 'shopping'
-    const name = meta?.regName || (typeof meta?.text === 'string' && meta.text) || listId
+    const listType = isDefaultSource ? DEFAULT_LIST_TYPE : (meta?.regType || items[0]?.listType || DEFAULT_LIST_TYPE)
+    const displayName = typeof requestedName === 'string' ? requestedName.trim() : ''
+    const name = meta?.regName || (typeof meta?.text === 'string' && meta.text) || displayName
+        || (isDefaultSource ? 'Groceries' : listId)
     const groupId = meta?.regGroupId ?? null
     const order = typeof meta?.regOrder === 'number' ? meta.regOrder : 0
     const view = meta?.regView
@@ -1517,6 +1539,7 @@ async function shareList (listId) {
     const ctx = createBaseContext({ role: 'shared' })
     const dirName = `owned-${Math.random().toString(36).slice(2, 12)}`
     let baseKeyHex = null
+    let targetListId = listId
     // Up to (and including) the personal-registry write everything is reversible:
     // a failure rolls back WITHOUT having tombstoned the personal copies, so no
     // data can be lost. Past that point the share is committed.
@@ -1525,36 +1548,107 @@ async function shareList (listId) {
         await bootstrapSharedOwner(ctx)
         setupSharedPairing(ctx)
         baseKeyHex = ctx.baseId
+        if (isDefaultSource) targetListId = promotedDefaultListId(baseKeyHex)
+        if (!targetListId) throw new Error('could not derive promoted list id')
         recordSharedBaseDir(baseKeyHex, dirName) // so reconcile reopens it on restart
 
-        // Seed the list's items (identity preserved) PLUS a self-describing
-        // registry meta-item, so a joiner learns the canonical listId even for
-        // an empty list (and never has to guess one — see joinList).
+        // Seed the list's items PLUS a self-describing registry meta-item, so a
+        // joiner learns the canonical listId even for an empty list. Named-list
+        // identity is preserved; literal default groceries are deliberately
+        // re-IDed because every recipient already owns `default`.
+        const seededItems = isDefaultSource
+            ? shapeDefaultPromotionItems(items, {
+                sourceListId: DEFAULT_LIST_ID,
+                sourceListType: DEFAULT_LIST_TYPE,
+                targetListId,
+            }).seeded
+            : items
         await seedSharedBase(ctx, [
-            ...items,
-            buildListMetaItem({ id: listId, name, type: listType, groupId, order, view, updatedAt: Date.now() }),
+            ...seededItems,
+            buildListMetaItem({ id: targetListId, name, type: listType, groupId, order, view, updatedAt: Date.now() }),
         ])
 
+        // A re-ID promotion's personal tombstones remain under `default` while
+        // the shared registry entry lives under targetListId. Persist a separate
+        // descriptor before commit so orphan-heal can always find and re-home
+        // those originals even after clients later rename/move the list meta.
+        if (isDefaultSource) {
+            const sourceOk = await updateItem(buildSharedSourceItem({
+                baseKey: baseKeyHex,
+                targetListId,
+                sourceListId: DEFAULT_LIST_ID,
+                sourceListType: DEFAULT_LIST_TYPE,
+                updatedAt: Date.now(),
+            }))
+            if (!sourceOk) throw new Error('shared source metadata update refused')
+        }
+
         baseManager.register(baseKeyHex, ctx)
-        _listIdToBaseKey.set(listId, baseKeyHex)
+        _listIdToBaseKey.set(targetListId, baseKeyHex)
 
         // Point the personal registry at the shared base BEFORE tombstoning, and
         // confirm it landed — otherwise a missing regBaseKey would, after a
         // restart, route this list's writes back into the personal base.
-        const regOk = await updateItem(buildListMetaItem({ id: listId, name, type: listType, groupId, order, view, baseKey: baseKeyHex, updatedAt: Date.now() }))
+        const regOk = await updateItem(buildListMetaItem({ id: targetListId, name, type: listType, groupId, order, view, baseKey: baseKeyHex, updatedAt: Date.now() }))
         if (!regOk) throw new Error('personal registry update refused')
     } catch (e) {
         logger.log('[ERROR] shareList failed before commit; rolling back:', e)
-        if (baseKeyHex) { _listIdToBaseKey.delete(listId); baseManager.remove(baseKeyHex) }
+        if (baseKeyHex) { _listIdToBaseKey.delete(targetListId); baseManager.remove(baseKeyHex) }
         try { clearWriteChain(ctx) } catch (_) {}
         try { await closeSharedBase(ctx) } catch (_) {}
         return { ok: false, reason: 'share-failed' }
     }
 
-    // Committed: the registry now points at the shared base. Tombstone the
-    // personal copies (best-effort) and mint the invite.
-    for (const item of items) {
-        try { await deleteItem(item) } catch (e) { logger.log('[ERROR] share-list tombstone:', e) }
+    // Committed: the registry now points at the shared base. For a default
+    // promotion, do not report success (or delete the originals) until the
+    // synced visibility marker has itself been durably accepted.
+    let defaultVisibilityAccepted = true
+    if (isDefaultSource) {
+        const newestSourceWrite = items.reduce((max, item) => Math.max(max, Number(item?.updatedAt) || 0), 0)
+        const visibilityFloor = Math.max(Date.now(), newestSourceWrite + 1)
+        defaultVisibilityAccepted = false
+        for (let attempt = 0; attempt < 3 && !defaultVisibilityAccepted; attempt++) {
+            try {
+                defaultVisibilityAccepted = await updateItem(buildBuiltinVisibilityItem({
+                    listId: DEFAULT_LIST_ID,
+                    type: DEFAULT_LIST_TYPE,
+                    hidden: true,
+                    updatedAt: visibilityFloor + attempt,
+                }))
+            } catch (e) { logger.log('[ERROR] share-list default visibility:', e) }
+            if (!defaultVisibilityAccepted && attempt < 2) {
+                await new Promise((resolve) => setTimeout(resolve, 100))
+            }
+        }
+
+        if (!defaultVisibilityAccepted) {
+            logger.log('[ERROR] Default grocery promotion committed but visibility marker was not accepted', {
+                listId: targetListId,
+                baseKey: baseKeyHex.slice(0, 16),
+            })
+        } else {
+            // Preserve the owner's day-plan pointers across the canonical re-ID.
+            // Write the new pointer first; if a later clear stalls, the Overview
+            // may briefly duplicate an entry but never loses it.
+            const migrations = buildDefaultPlanMigrations(all, {
+                sourceListId: DEFAULT_LIST_ID,
+                sourceListType: DEFAULT_LIST_TYPE,
+                sourceItemIds: new Set(items.map((item) => item.id)),
+                targetListId,
+                updatedAt: Date.now(),
+            })
+            for (const migration of migrations) {
+                try {
+                    const added = await updateItem(migration.add)
+                    if (added) await updateItem(migration.clear)
+                } catch (e) { logger.log('[ERROR] share-list plan migration:', e) }
+            }
+        }
+    }
+    if (defaultVisibilityAccepted) {
+        for (const item of items) {
+            try { await deleteItem(item) } catch (e) { logger.log('[ERROR] share-list tombstone:', e) }
+        }
     }
     // Propagate this base's READ credentials through the personal base so YOUR
     // OTHER devices auto-open (and, once authorized, co-edit) the list without an
@@ -1569,9 +1663,26 @@ async function shareList (listId) {
     } catch (e) { logger.log('[ERROR] share-list creds propagation:', e) }
     projectSharedListToFrontend(ctx)
     broadcastMembershipRoster(ctx) // the owner can administer this shared list
+    if (!defaultVisibilityAccepted) {
+        // The shared base + registry entry are already committed. Reporting an
+        // ordinary failure would invite the client to retry `default` and create
+        // a second base, so return a usable invite with an explicit degraded
+        // marker. The queued/next visibility write can finish the owner-side
+        // transition later; originals were deliberately NOT tombstoned above.
+        const invite = createSharedInvite(ctx) || null
+        return {
+            ok: true,
+            committed: true,
+            degraded: true,
+            reason: 'visibility-write-failed',
+            invite,
+            baseKey: baseKeyHex,
+            listId: targetListId,
+        }
+    }
     const invite = createSharedInvite(ctx) || null
-    logger.log('[INFO] Shared list promoted to its own base', { listId, baseKey: baseKeyHex.slice(0, 16), invite: !!invite })
-    return { ok: true, invite, baseKey: baseKeyHex }
+    logger.log('[INFO] Shared list promoted to its own base', { listId: targetListId, sourceListId: listId, baseKey: baseKeyHex.slice(0, 16), invite: !!invite })
+    return { ok: true, invite, baseKey: baseKeyHex, listId: targetListId }
 }
 
 // Additively join a shared list's base via its invite (NOT the destructive
@@ -1844,7 +1955,11 @@ export async function apply (ctx, nodes, view, host) {
         // personal base carries the registry; shared bases never do.
         if (isPersonalContext(ctx) && isRegistryItem(operation.value)) {
             indexRegistryItemRoute(operation.value)
-            scheduleReconcileSharedBases()
+            // Only a LIST descriptor can change the desired shared-base set.
+            // Group records and recovery-only registry metadata (such as a
+            // re-ID promotion's shared-source marker) must not reconcile in the
+            // middle of shareList's source-meta -> list-meta commit sequence.
+            if (operation.value?.regKind === REG_KIND_LIST) scheduleReconcileSharedBases()
         }
         // Cross-device auto-join channels (propagated read-creds / write-access
         // requests) ride the personal base but are NEVER shown in the UI — they

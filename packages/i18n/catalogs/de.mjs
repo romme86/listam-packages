@@ -313,7 +313,7 @@ export const DE_MESSAGES = {
     'shareList.shared': 'Geteilt',
     'shareList.showInvite': 'Jemanden zu dieser Liste einladen',
     'shareList.failed': 'Diese Liste konnte nicht geteilt werden.',
-    'shareList.builtinBlocked': 'Die integrierten Listen Einkäufe, Board und To-do teilen sich eine Liste und können nicht einzeln geteilt werden. Erstelle eine benannte Liste zum Teilen.',
+    'shareList.builtinBlocked': 'Ältere integrierte Board- und To-do-Listen können nicht geteilt werden. Erstelle zum Teilen ein benanntes Board oder eine benannte To-do-Liste.',
     'joinList.button': 'Liste beitreten',
     'joinList.title': 'Geteilter Liste beitreten',
     'joinList.subtitle': 'Füge eine Einladung ein, um eine geteilte Liste hinzuzufügen. Deine übrigen Listen bleiben privat.',

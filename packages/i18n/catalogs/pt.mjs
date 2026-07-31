@@ -313,7 +313,7 @@ export const PT_MESSAGES = {
     'shareList.shared': 'Compartilhada',
     'shareList.showInvite': 'Convidar alguém para esta lista',
     'shareList.failed': 'Não foi possível compartilhar esta lista.',
-    'shareList.builtinBlocked': 'As listas integradas Compras, Quadro e Tarefas compartilham uma única lista e não podem ser compartilhadas separadamente. Crie uma lista nomeada para compartilhar.',
+    'shareList.builtinBlocked': 'Os quadros e as listas de tarefas integrados antigos não podem ser compartilhados. Crie um quadro ou uma lista de tarefas com nome para compartilhar.',
     'joinList.button': 'Entrar em uma lista',
     'joinList.title': 'Entrar em uma lista compartilhada',
     'joinList.subtitle': 'Cole um convite para adicionar uma lista compartilhada. Suas outras listas continuam privadas.',

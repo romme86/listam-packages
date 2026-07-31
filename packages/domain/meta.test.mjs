@@ -14,7 +14,7 @@ import { BOARD_LIST_TYPE, LEGACY_BOARD_LIST_TYPE } from './board.mjs'
 import { PRESENCE_LIST_TYPE } from './presence.mjs'
 import { PLAN_LIST_TYPE } from './plan.mjs'
 import { REGISTRY_LIST_TYPE } from './list-registry.mjs'
-import { isLabelItem } from './labels.mjs'
+import { BUILTIN_VISIBILITY_LIST_TYPE, isLabelItem } from './labels.mjs'
 
 const item = (listType) => ({ id: 'x', text: 't', listId: 'l', listType })
 
@@ -63,7 +63,7 @@ test('isMetaItem agrees with the pre-existing label predicate', () => {
     // isLabelItem already covered peer/surface/builtin-group/value-return and
     // presence. Every item it accepts must remain meta, or call sites that
     // switch to isMetaItem would start rendering records they used to skip.
-    for (const listType of ['peer', 'surfacename', 'builtingroup', 'valuereturn', PRESENCE_LIST_TYPE]) {
+    for (const listType of ['peer', 'surfacename', 'builtingroup', BUILTIN_VISIBILITY_LIST_TYPE, 'valuereturn', PRESENCE_LIST_TYPE]) {
         assert.equal(isLabelItem(item(listType)), true, `${listType} label`)
         assert.equal(isMetaItem(item(listType)), true, `${listType} meta`)
     }

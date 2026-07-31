@@ -7,21 +7,27 @@ import {
     SURFACE_LABEL_LIST_TYPE,
     BUILTIN_GROUP_LIST_ID,
     BUILTIN_GROUP_LIST_TYPE,
+    BUILTIN_VISIBILITY_LIST_ID,
+    BUILTIN_VISIBILITY_LIST_TYPE,
     VALUE_RETURN_LIST_ID,
     VALUE_RETURN_LIST_TYPE,
     isPeerLabelItem,
     isSurfaceLabelItem,
     isBuiltinGroupItem,
+    isBuiltinVisibilityItem,
     isValueReturnItem,
     isLabelItem,
     surfaceLabelKey,
     buildPeerLabelItem,
     buildSurfaceLabelItem,
     buildBuiltinGroupItem,
+    buildBuiltinVisibilityItem,
     buildValueReturnItem,
     reducePeerLabels,
     reduceSurfaceLabels,
     reduceBuiltinGroups,
+    reduceHiddenBuiltinSurfaces,
+    isBuiltinSurfaceHidden,
     reduceValueReturn,
     cleanLabelName,
 } from './labels.mjs'
@@ -144,6 +150,60 @@ test('buildBuiltinGroupItem parks the groupId and is validator-safe', () => {
     assert.ok(normalizeListItem(it))
 })
 
+test('buildBuiltinVisibilityItem is canonical, validator-safe metadata', () => {
+    const it = buildBuiltinVisibilityItem({ listId: 'default', type: 'kanban', hidden: true, updatedAt: 7 })
+    assert.equal(it.id, 'default:board')
+    assert.equal(it.surfaceKey, 'default:board')
+    assert.equal(it.surfaceListId, 'default')
+    assert.equal(it.surfaceType, 'board')
+    assert.equal(it.listId, BUILTIN_VISIBILITY_LIST_ID)
+    assert.equal(it.listType, BUILTIN_VISIBILITY_LIST_TYPE)
+    assert.equal(it.builtinHidden, true)
+    assert.equal(it.text, '1')
+    assert.equal(it.labelName, '1')
+    assert.equal(isBuiltinVisibilityItem(it), true)
+    assert.equal(isLabelItem(it), true)
+    assert.equal(isRegistryItem(it), false)
+    assert.ok(normalizeListItem(it))
+})
+
+test('built-in visibility is LWW and an explicit visible record clears hidden', () => {
+    const items = [
+        buildBuiltinVisibilityItem({ listId: 'default', type: 'shopping', hidden: false, updatedAt: 1 }),
+        buildBuiltinVisibilityItem({ listId: 'default', type: 'shopping', hidden: true, updatedAt: 5 }),
+        buildBuiltinVisibilityItem({ listId: 'default', type: 'todo', hidden: true, updatedAt: 3 }),
+        buildBuiltinVisibilityItem({ listId: 'default', type: 'todo', hidden: false, updatedAt: 9 }),
+    ]
+    const hidden = reduceHiddenBuiltinSurfaces(items)
+    assert.deepEqual([...hidden], ['default:shopping'])
+    assert.equal(isBuiltinSurfaceHidden(items, 'default', 'shopping'), true)
+    assert.equal(isBuiltinSurfaceHidden(items, 'default', 'todo'), false)
+})
+
+test('same-timestamp or newer live content resurrects a hidden built-in surface', () => {
+    const hiddenAt10 = buildBuiltinVisibilityItem({ listId: 'default', type: 'shopping', hidden: true, updatedAt: 10 })
+    const oldMilk = { id: 'old', listId: 'default', listType: 'shopping', text: 'Milk', updatedAt: 9 }
+    const sameTimeMilk = { ...oldMilk, id: 'same', updatedAt: 10 }
+    const newerMilk = { ...oldMilk, id: 'new', updatedAt: 11 }
+
+    assert.equal(isBuiltinSurfaceHidden([hiddenAt10, oldMilk], 'default', 'shopping'), true)
+    assert.equal(isBuiltinSurfaceHidden([hiddenAt10, sameTimeMilk], 'default', 'shopping'), false)
+    assert.equal(isBuiltinSurfaceHidden([hiddenAt10, newerMilk], 'default', 'shopping'), false)
+})
+
+test('resurrection is surface-scoped and delete-shaped rows are not live content', () => {
+    const groceryHidden = buildBuiltinVisibilityItem({ listId: 'default', type: 'shopping', hidden: true, updatedAt: 10 })
+    const boardHidden = buildBuiltinVisibilityItem({ listId: 'default', type: 'board', hidden: true, updatedAt: 10 })
+    const todo = { id: 'todo', listId: 'default', listType: 'todo', text: 'Task', updatedAt: 11 }
+    const legacyBoard = { id: 'board', listId: 'default', listType: 'kanban', text: 'Card', updatedAt: 11 }
+    const deletedGrocery = { op: 'delete', id: 'gone', listId: 'default', listType: 'shopping', updatedAt: 12 }
+    const items = [groceryHidden, boardHidden, todo, legacyBoard, deletedGrocery]
+
+    assert.equal(isBuiltinSurfaceHidden(items, 'default', 'shopping'), true)
+    assert.equal(isBuiltinSurfaceHidden(items, 'default', 'board'), false)
+    assert.deepEqual([...reduceHiddenBuiltinSurfaces(items)], ['default:shopping'])
+})
+
 test('reduceBuiltinGroups keeps newest groupId by updatedAt, ignores noise', () => {
     const items = [
         buildBuiltinGroupItem({ listId: 'default', type: 'shopping', groupId: 'general', updatedAt: 1 }),
@@ -165,7 +225,7 @@ test('an empty builtin-group value clears the placement (reverts to general)', (
     assert.equal(reduceBuiltinGroups(items).has('default:board'), false)
 })
 
-test('the three label buckets stay isolated (no cross-read)', () => {
+test('the label buckets stay isolated (no cross-read)', () => {
     const items = [
         buildPeerLabelItem({ writerKey: 'k', name: 'Phone', updatedAt: 1 }),
         buildSurfaceLabelItem({ listId: 'default', type: 'shopping', name: 'Spesa', updatedAt: 1 }),

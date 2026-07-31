@@ -313,7 +313,7 @@ export const EN_MESSAGES = {
     'shareList.shared': 'Shared',
     'shareList.showInvite': 'Invite someone to this list',
     'shareList.failed': 'Could not share this list.',
-    'shareList.builtinBlocked': 'The built-in Groceries, Board and To-do lists share one list and can’t be shared on their own. Create a named list to share.',
+    'shareList.builtinBlocked': 'Legacy built-in Board and To-do lists can’t be shared. Create a named board or to-do list to share.',
     'joinList.button': 'Join a list',
     'joinList.title': 'Join a shared list',
     'joinList.subtitle': 'Paste an invite to add one shared list. Your other lists stay private.',
