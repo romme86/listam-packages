@@ -167,7 +167,7 @@ export function secretFingerprint(value) {
 }
 
 export function emptyBackendSecretPayload() {
-    return { version: SECRET_PAYLOAD_VERSION, mode: 'none', secrets: {} }
+    return { version: SECRET_PAYLOAD_VERSION, mode: 'none', secrets: {}, readFailures: [] }
 }
 
 export function parseBackendSecretPayload(rawPayload, options = {}) {
@@ -181,14 +181,27 @@ export function parseBackendSecretPayload(rawPayload, options = {}) {
             const value = normalizeSecretValue(name, parsed?.secrets?.[name])
             if (value) secrets[name] = value
         }
+        const readFailures = Array.isArray(parsed?.readFailures)
+            ? parsed.readFailures.filter((name) => typeof name === 'string')
+            : []
         options.logger?.log?.('[INFO] Backend boot secrets received', {
             mode: parsed?.mode || 'unknown',
             fingerprints: fingerprintsFor(secrets),
+            readFailures,
         })
+        // Loud on purpose: a boot that is missing key material it could not READ
+        // looks exactly like a first boot from here on, and the difference is
+        // whether this device keeps its project or silently adopts another.
+        if (readFailures.length > 0) {
+            options.logger?.log?.('[ERROR] Boot secrets incomplete: key material exists but could not be read', {
+                readFailures,
+            })
+        }
         return {
             version: Number(parsed?.version) || SECRET_PAYLOAD_VERSION,
             mode: parsed?.mode || 'unknown',
             secrets,
+            readFailures,
         }
     } catch (e) {
         options.logger?.log?.('[ERROR] Failed to parse backend boot secret payload:', e)
@@ -236,12 +249,13 @@ export function parseSecretAck(ack) {
 
 export async function prepareBackendSecrets(adapters) {
     const warnings = []
-    const secureStorageAvailable = await isSecureStoreAvailable(adapters.secureStore, warnings)
+    const readFailures = []
+    const secureStorageAvailable = await isSecureStoreAvailable(adapters.secureStore, warnings, readFailures)
     const secureSecrets = secureStorageAvailable
-        ? await readSecureSecrets(adapters.secureStore, warnings)
+        ? await readSecureSecrets(adapters.secureStore, warnings, readFailures)
         : {}
     const legacySecrets = adapters.legacyFiles
-        ? await readLegacySecrets(adapters.legacyFiles, warnings)
+        ? await readLegacySecrets(adapters.legacyFiles, warnings, secureStorageAvailable ? null : readFailures)
         : {}
 
     if (secureStorageAvailable && adapters.legacyFiles) {
@@ -283,9 +297,14 @@ export async function prepareBackendSecrets(adapters) {
             version: SECRET_PAYLOAD_VERSION,
             mode,
             secrets: pickBackendSecrets(effectiveSecrets),
+            // Carried across the host→backend boundary so the backend can log
+            // (and later refuse) a boot whose key material was unreadable rather
+            // than absent. An empty list means "everything we hold, we read".
+            readFailures: [...readFailures],
         },
         mode,
         secureStorageAvailable,
+        readFailures,
         warnings,
     }
 }
@@ -493,6 +512,18 @@ export async function deleteLoyaltyCardPayload(handleOrId, adapters) {
     }
 }
 
+// Raised when a secret store exists but cannot be read. Distinct from "no
+// secrets stored" on purpose: callers must be able to refuse to boot rather
+// than treat unreadable key material as an empty device.
+export class SecretStoreUnreadableError extends Error {
+    constructor(path, cause) {
+        super(`Secret store exists but could not be read: ${path}`)
+        this.name = 'SecretStoreUnreadableError'
+        this.code = 'SECRET_STORE_UNREADABLE'
+        this.cause = cause
+    }
+}
+
 // File-backed secret store with the SecureSecretStore adapter shape, for
 // desktop/headless hosts that have no platform keychain bridge yet. All
 // values live in one owner-only (0600) JSON file under the app's private
@@ -502,17 +533,41 @@ export async function deleteLoyaltyCardPayload(handleOrId, adapters) {
 export function createFileSecretStore({ fs, path }) {
     if (!fs || !path) throw new Error('A filesystem adapter and file path are required')
 
+    // Absent is the ONLY state that may read as "this device has no secrets":
+    // that is a first boot. A file that exists but cannot be read or parsed is a
+    // fault, and swallowing it into `{}` made a truncated write indistinguishable
+    // from a fresh install — the host then boots with no base key at all, which
+    // is not a fresh start (the Corestore beside it still carries the base) but a
+    // silent switch to whatever identity that store points at.
     function readAll() {
+        let raw
         try {
-            const parsed = JSON.parse(fs.readFileSync(path, 'utf8'))
-            return parsed && typeof parsed === 'object' ? parsed : {}
-        } catch {
-            return {}
+            raw = fs.readFileSync(path, 'utf8')
+        } catch (e) {
+            if (e?.code === 'ENOENT') return {}
+            throw new SecretStoreUnreadableError(path, e)
         }
+
+        let parsed
+        try {
+            parsed = JSON.parse(raw)
+        } catch (e) {
+            throw new SecretStoreUnreadableError(path, e)
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new SecretStoreUnreadableError(path, new Error('Secret store is not a JSON object'))
+        }
+        return parsed
     }
 
+    // Written through a temp file: `writeFileSync` truncates in place, so a
+    // crash or power loss mid-write (a Pi losing power is the realistic one)
+    // left a half-written file that the old reader reported as "no secrets".
+    // Every write is a full-document rewrite, so a torn one loses every key.
     function writeAll(values) {
-        fs.writeFileSync(path, JSON.stringify(values), { mode: 0o600 })
+        const tmp = `${path}.tmp`
+        fs.writeFileSync(tmp, JSON.stringify(values), { mode: 0o600 })
+        fs.renameSync(tmp, path)
     }
 
     return {
@@ -542,16 +597,20 @@ function parsePersistRequest(rawRequest) {
     return JSON.parse(rawRequest)
 }
 
-async function isSecureStoreAvailable(secureStore, warnings) {
+async function isSecureStoreAvailable(secureStore, warnings, readFailures) {
     try {
         return await secureStore.isAvailable()
     } catch {
         warnings.push('Secure storage availability check failed.')
+        // A store that THREW is not a store that reported "unavailable": the
+        // caller would otherwise fall through to the empty memory tier and boot
+        // as if this device had never held a key.
+        readFailures?.push('secure-storage-availability')
         return false
     }
 }
 
-async function readSecureSecrets(secureStore, warnings) {
+async function readSecureSecrets(secureStore, warnings, readFailures) {
     const secrets = {}
     for (const name of SECRET_NAMES) {
         try {
@@ -559,6 +618,10 @@ async function readSecureSecrets(secureStore, warnings) {
             if (value) secrets[name] = value
         } catch {
             warnings.push(`Secure storage read failed for ${name}.`)
+            // Recorded separately from the warning text so hosts can branch on
+            // it. A missing secret and a secret that failed to read are the same
+            // shape in `secrets`, and only this list tells them apart.
+            readFailures.push(name)
         }
     }
     return secrets
@@ -574,7 +637,11 @@ async function deleteCleanupFiles(legacyFiles, warnings) {
     }
 }
 
-async function readLegacySecrets(legacyFiles, warnings) {
+// `readFailures` is null when secure storage is the effective source: a legacy
+// file is then only a migration input, and failing to read one cannot cost this
+// device its identity. When secure storage is unavailable these files ARE the
+// identity, so failures count.
+async function readLegacySecrets(legacyFiles, warnings, readFailures) {
     const secrets = {}
     for (const name of SECRET_NAMES) {
         const filename = SECURE_SECRET_FILES[name]
@@ -583,6 +650,7 @@ async function readLegacySecrets(legacyFiles, warnings) {
             if (value) secrets[name] = value
         } catch {
             warnings.push(`Legacy secret read failed for ${name}.`)
+            readFailures?.push(name)
         }
     }
     return secrets

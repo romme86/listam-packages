@@ -28,16 +28,21 @@ export type BackendSecretPayload = {
     version: number
     mode: SecretMode
     secrets: Partial<Record<SecretName, string>>
+    /** Secrets that exist but could NOT be read; empty means "absent is real". */
+    readFailures: string[]
 }
 export type ParsedBackendSecretPayload = {
     version: number
     mode: ParsedSecretMode
     secrets: Partial<Record<SecretName, string>>
+    readFailures: string[]
 }
 export type PreparedBackendSecrets = {
     backendPayload: BackendSecretPayload
     mode: SecretMode
     secureStorageAvailable: boolean
+    /** Non-empty when key material could not be read — never treat as a fresh device. */
+    readFailures: string[]
     warnings: string[]
 }
 export type SecureSecretStore = {
@@ -135,9 +140,14 @@ export function createDeleteSecretPayload(name: SecretName): DeleteSecretPayload
 export function parseSecretAck(ack: unknown): boolean
 export function prepareBackendSecrets(adapters: SecretStorageAdapters): Promise<PreparedBackendSecrets>
 export function persistBackendSecretRequest(rawRequest: string | BackendSecretPersistRequest, adapters: SecretStorageAdapters): Promise<{ mode: SecretMode; warning?: string }>
+export class SecretStoreUnreadableError extends Error {
+    readonly code: 'SECRET_STORE_UNREADABLE'
+    constructor(path: string, cause?: unknown)
+}
 export type FileSecretStoreFs = {
     readFileSync(path: string, encoding: string): string
     writeFileSync(path: string, data: string, options?: { mode?: number }): void
+    renameSync(from: string, to: string): void
 }
 export function createFileSecretStore(options: { fs: FileSecretStoreFs; path: string }): SecureSecretStore
 export function prepareLoyaltyCardPayloads(adapters: LoyaltyCardStorageAdapters): Promise<PreparedLoyaltyCardPayloads>

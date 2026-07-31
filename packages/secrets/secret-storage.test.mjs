@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import {
     LEGACY_SECRET_FILES,
     SECRET_METADATA_KEY,
+    createFileSecretStore,
+    emptyBackendSecretPayload,
+    parseBackendSecretPayload,
     prepareBackendSecrets,
     persistBackendSecretRequest,
     secretStoreKey,
@@ -227,15 +230,154 @@ test('epoch keys are validated as 32-byte key material', async () => {
     }), /Invalid secret value/)
 })
 
+// --- absent vs unreadable -------------------------------------------------
+// A read that FAILS and a secret that was never stored produce the same empty
+// `secrets`. Only readFailures separates them, and the difference decides
+// whether a host may treat itself as a fresh device.
+
+test('a first boot with nothing stored reports no read failures', async () => {
+    const prepared = await prepareBackendSecrets({ secureStore: createSecureStore().adapter })
+
+    assert.deepEqual(prepared.backendPayload.secrets, {})
+    assert.deepEqual(prepared.readFailures, [])
+    assert.deepEqual(prepared.backendPayload.readFailures, [])
+})
+
+test('a keychain read that throws is reported as a failure, not as an absent secret', async () => {
+    const secure = createSecureStore({ failReadsFor: [secretStoreKey('autobaseKey')] })
+    const prepared = await prepareBackendSecrets({ secureStore: secure.adapter })
+
+    assert.deepEqual(prepared.readFailures, ['autobaseKey'])
+    assert.deepEqual(prepared.backendPayload.readFailures, ['autobaseKey'])
+    assert.equal(prepared.backendPayload.secrets.autobaseKey, undefined)
+    assert.ok(prepared.warnings.some((w) => w.includes('autobaseKey')))
+})
+
+test('an availability check that throws is a read failure, not an unavailable store', async () => {
+    const secure = createSecureStore({ failAvailability: true })
+    const prepared = await prepareBackendSecrets({ secureStore: secure.adapter })
+
+    assert.equal(prepared.secureStorageAvailable, false)
+    assert.deepEqual(prepared.readFailures, ['secure-storage-availability'])
+})
+
+test('a legacy read failure counts only when the legacy files ARE the identity', async () => {
+    const withSecure = await prepareBackendSecrets({
+        secureStore: createSecureStore().adapter,
+        legacyFiles: createLegacyFiles({}, { failReadsFor: [LEGACY_SECRET_FILES.autobaseKey] }).adapter,
+    })
+    // Secure storage works, so a legacy file is only a migration input.
+    assert.deepEqual(withSecure.readFailures, [])
+
+    const withoutSecure = await prepareBackendSecrets({
+        secureStore: createSecureStore({ available: false }).adapter,
+        legacyFiles: createLegacyFiles({}, { failReadsFor: [LEGACY_SECRET_FILES.autobaseKey] }).adapter,
+    })
+    assert.deepEqual(withoutSecure.readFailures, ['autobaseKey'])
+})
+
+test('the boot payload carries read failures across the host/backend boundary', () => {
+    const parsed = parseBackendSecretPayload(JSON.stringify({
+        version: 1,
+        mode: 'secure-store',
+        secrets: {},
+        readFailures: ['autobaseKey', 42],
+    }))
+
+    assert.deepEqual(parsed.readFailures, ['autobaseKey'])
+    assert.deepEqual(emptyBackendSecretPayload().readFailures, [])
+    assert.deepEqual(parseBackendSecretPayload(null).readFailures, [])
+})
+
+// --- file secret store ----------------------------------------------------
+
+test('a missing secret file reads as an empty device (the real first boot)', async () => {
+    const store = createFileSecretStore({ fs: createMemoryFs(), path: '/data/secrets.json' })
+    assert.equal(await store.getItem('listam.secret.v1.autobaseKey'), null)
+})
+
+test('an unreadable secret file throws instead of reading as an empty device', async () => {
+    for (const corrupt of ['{"listam.secret.v1.autobaseKey":"aaa', 'null', '[]', '']) {
+        const fs = createMemoryFs({ '/data/secrets.json': corrupt })
+        const store = createFileSecretStore({ fs, path: '/data/secrets.json' })
+        await assert.rejects(() => store.getItem('listam.secret.v1.autobaseKey'), {
+            code: 'SECRET_STORE_UNREADABLE',
+        })
+    }
+})
+
+test('a write to an unreadable secret file refuses instead of clobbering the other keys', async () => {
+    const fs = createMemoryFs({ '/data/secrets.json': '{"listam.secret.v1.autobaseKey":"aaa' })
+    const store = createFileSecretStore({ fs, path: '/data/secrets.json' })
+
+    await assert.rejects(() => store.setItem('listam.secret.v1.epochKey', 'b'.repeat(64)), {
+        code: 'SECRET_STORE_UNREADABLE',
+    })
+    await assert.rejects(() => store.deleteItem('listam.secret.v1.epochKey'), {
+        code: 'SECRET_STORE_UNREADABLE',
+    })
+    // The damaged file is still there to be recovered by hand, not overwritten
+    // with a single-key document.
+    assert.equal(fs.files.get('/data/secrets.json'), '{"listam.secret.v1.autobaseKey":"aaa')
+})
+
+test('secret writes land atomically so a torn write cannot erase every key', async () => {
+    const fs = createMemoryFs()
+    const store = createFileSecretStore({ fs, path: '/data/secrets.json' })
+
+    await store.setItem('listam.secret.v1.autobaseKey', 'a'.repeat(64))
+    assert.deepEqual(fs.writes, ['/data/secrets.json.tmp'])
+    assert.deepEqual(fs.renames, [['/data/secrets.json.tmp', '/data/secrets.json']])
+    assert.equal(await store.getItem('listam.secret.v1.autobaseKey'), 'a'.repeat(64))
+
+    await store.setItem('listam.secret.v1.epochKey', 'b'.repeat(64))
+    assert.equal(await store.getItem('listam.secret.v1.autobaseKey'), 'a'.repeat(64))
+    assert.equal(fs.modes.at(-1), 0o600)
+})
+
+function createMemoryFs(initialFiles = {}) {
+    const files = new Map(Object.entries(initialFiles))
+    const writes = []
+    const renames = []
+    const modes = []
+    return {
+        files,
+        writes,
+        renames,
+        modes,
+        readFileSync(path) {
+            if (!files.has(path)) {
+                const err = new Error(`ENOENT: no such file, open '${path}'`)
+                err.code = 'ENOENT'
+                throw err
+            }
+            return files.get(path)
+        },
+        writeFileSync(path, data, options) {
+            writes.push(path)
+            modes.push(options?.mode)
+            files.set(path, data)
+        },
+        renameSync(from, to) {
+            renames.push([from, to])
+            files.set(to, files.get(from))
+            files.delete(from)
+        },
+    }
+}
+
 function createSecureStore(options = {}) {
     const values = new Map(Object.entries(options.values ?? {}))
+    const failReads = new Set(options.failReadsFor ?? [])
     return {
         values,
         adapter: {
             async isAvailable() {
+                if (options.failAvailability) throw new Error('keychain unavailable')
                 return options.available ?? true
             },
             async getItem(key) {
+                if (failReads.has(key)) throw new Error(`read failed for ${key}`)
                 return values.get(key) ?? null
             },
             async setItem(key, value) {
@@ -248,10 +390,11 @@ function createSecureStore(options = {}) {
     }
 }
 
-function createLegacyFiles(initialFiles = {}) {
+function createLegacyFiles(initialFiles = {}, options = {}) {
     const files = { ...initialFiles }
     const deleted = []
     const reads = []
+    const failReads = new Set(options.failReadsFor ?? [])
     return {
         deleted,
         reads,
@@ -261,6 +404,7 @@ function createLegacyFiles(initialFiles = {}) {
         adapter: {
             async readFile(filename) {
                 reads.push(filename)
+                if (failReads.has(filename)) throw new Error(`read failed for ${filename}`)
                 return files[filename] ?? null
             },
             async deleteFile(filename) {
