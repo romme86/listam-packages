@@ -111,16 +111,36 @@ function parseJoinCandidateUserData (userData) {
     return writerKey ? { writerKey, epochPublicKey: null } : null
 }
 
+function sharedInviteDiscoveryKey (invite) {
+    const normalized = normalizeInviteCode(invite)
+    if (!normalized) return null
+    const info = BlindPairing.decodeInvite(z32.decode(normalized))
+    if (!info?.discoveryKey) return null
+    return info.discoveryKey
+}
+
 // A stable per-base local directory name derived from the invite's discovery
 // key (a hash of the base key, so the joiner knows it upfront and reconcile can
 // recompute it). Lets the join flow choose its Corestore dir before pairing
 // reveals the actual base key.
 export function sharedDirNameForInvite (invite) {
-    const normalized = normalizeInviteCode(invite)
-    if (!normalized) return null
-    const info = BlindPairing.decodeInvite(z32.decode(normalized))
-    if (!info?.discoveryKey) return null
-    return `joined-${b4a.toString(info.discoveryKey, 'hex')}`
+    const discoveryKey = sharedInviteDiscoveryKey(invite)
+    return discoveryKey ? `joined-${b4a.toString(discoveryKey, 'hex')}` : null
+}
+
+// An invite identifies the base by discovery key before pairing reveals its
+// public key. Reusing an already-open context for that discovery key prevents a
+// device which auto-joined through propagated credentials from pairing again
+// under a second local writer identity.
+export function findSharedContextForInvite (contexts, invite) {
+    const discoveryKey = sharedInviteDiscoveryKey(invite)
+    if (!discoveryKey) return null
+    for (const ctx of (contexts || [])) {
+        const autobase = ctx?.autobase
+        if (!autobase || autobase.closing || !autobase.discoveryKey) continue
+        if (b4a.equals(autobase.discoveryKey, discoveryKey)) return ctx
+    }
+    return null
 }
 
 // --- Per-base secret persistence ----------------------------------------------
@@ -282,19 +302,36 @@ export async function closeSharedBase (ctx) {
 // the per-ctx checkpoint resumes its scan, and apply() independently re-derives
 // the same membership on its first post-reopen pass.
 export async function rebuildSharedListFromView (ctx) {
-    if (!ctx.autobase?.view || !ctx.viewCheckpoint) return
+    if (!ctx.autobase?.view || !ctx.viewCheckpoint) return false
     try {
-        const { items, membershipRecords, boardConfigRecords } = await ctx.viewCheckpoint.update(ctx.autobase.view, {
+        const { items, allItems, membershipRecords, boardConfigRecords, complete } = await ctx.viewCheckpoint.update(ctx.autobase.view, {
             onError: (i, e) => logger.log('[ERROR] shared rebuild entry', i, e?.message ?? e),
         })
+        if (!complete) {
+            logger.log('[WARNING] Shared-base rebuild incomplete; retaining the previous in-memory projection')
+            return false
+        }
         ctx.setMembershipState(reduceMembershipLog(membershipRecords, { baseKey: ctx.autobase?.key }))
         ctx.setBoardConfigState(reduceBoardConfigLog(boardConfigRecords, {
             baseKey: ctx.autobase?.key,
             ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
         }))
-        ctx.setCurrentList(items)
+        // `items` is the reducer's default bucket. Shared bases normally carry
+        // a named list plus their self-describing registry item, so derive the
+        // canonical bucket from the descriptor (or first real item) and restore
+        // that bucket instead. This also covers empty shared lists: their meta
+        // item still identifies the bucket even when it has no rows.
+        const registry = reduceRegistry(allItems)
+        const firstRealItem = allItems.find((item) => item && !isRegistryItem(item) && typeof item.listId === 'string')
+        const sharedListId = ctx.sharedListId || registry.lists[0]?.id || firstRealItem?.listId || null
+        if (sharedListId) ctx.sharedListId = sharedListId
+        ctx.setCurrentList(sharedListId
+            ? allItems.filter((item) => item && !isRegistryItem(item) && item.listId === sharedListId)
+            : items)
+        return true
     } catch (e) {
         logger.log('[ERROR] rebuildSharedListFromView failed:', e)
+        return false
     }
 }
 
@@ -359,6 +396,18 @@ function rotateSharedInvite (ctx) {
     ctx.inviteUsesRemaining = 0
 }
 
+// Re-pairing the SAME writer is idempotent only while its epoch public key also
+// matches. A changed key still needs an owner-signed record so a future epoch
+// rotation encrypts the grant to material the writer actually holds.
+export function sharedWriterMembershipRecordRequired (ctx, joiner) {
+    const writerKey = normalizeHex32(joiner?.writerKey)
+    if (!writerKey || !ctx?.membershipState?.writers?.has(writerKey)) return true
+    const presentedEpochKey = normalizeHex32(joiner?.epochPublicKey)
+    if (!presentedEpochKey) return false
+    const registeredEpochKey = normalizeHex32(ctx.membershipState.writerEpochPublicKeys?.get(writerKey))
+    return registeredEpochKey !== presentedEpochKey
+}
+
 // --- Host-side pairing listener (accepts joiners as writers) ------------------
 export function setupSharedPairing (ctx) {
     if (!ctx.autobase || !ctx.swarm) return
@@ -388,14 +437,16 @@ export function setupSharedPairing (ctx) {
                 const joiner = parseJoinCandidateUserData(candidate.userData)
                 if (!joiner?.writerKey) throw new Error('Join candidate did not provide a writer key')
 
-                const record = createAddWriterMembershipRecord({
-                    ownerAuthorityKeyPair: ctx.ownerAuthorityKeyPair,
-                    writerKey: joiner.writerKey,
-                    baseKey: ctx.autobase.key,
-                    sequence: nextMembershipSequence(ctx.membershipState),
-                    epochPublicKey: joiner.epochPublicKey,
-                })
-                await ctx.autobase.append(record)
+                if (sharedWriterMembershipRecordRequired(ctx, joiner)) {
+                    const record = createAddWriterMembershipRecord({
+                        ownerAuthorityKeyPair: ctx.ownerAuthorityKeyPair,
+                        writerKey: joiner.writerKey,
+                        baseKey: ctx.autobase.key,
+                        sequence: nextMembershipSequence(ctx.membershipState),
+                        epochPublicKey: joiner.epochPublicKey,
+                    })
+                    await ctx.autobase.append(record)
+                }
                 await ctx.autobase.update()
 
                 if (reservedInvite.epochAtMint !== (Number(ctx.membershipState.currentEpoch) || 0)) {
@@ -425,15 +476,21 @@ export async function sharedListIdentity (ctx) {
     if (!ctx.autobase?.view || !ctx.viewCheckpoint) return null
     let allItems = []
     try {
-        ({ allItems = [] } = await ctx.viewCheckpoint.update(ctx.autobase.view, { onError: () => {} }))
+        const result = await ctx.viewCheckpoint.update(ctx.autobase.view, { onError: () => {} })
+        if (!result.complete) return null
+        allItems = result.allItems || []
     } catch { return null }
     const reg = reduceRegistry(allItems)
     if (reg.lists.length > 0) {
         const l = reg.lists[0]
+        ctx.sharedListId = l.id
         return { listId: l.id, name: l.name || l.id, type: l.type || 'shopping' }
     }
     const item = allItems.find((i) => i && !isRegistryItem(i) && typeof i.listId === 'string')
-    if (item) return { listId: item.listId, name: item.listId, type: item.listType || 'shopping' }
+    if (item) {
+        ctx.sharedListId = item.listId
+        return { listId: item.listId, name: item.listId, type: item.listType || 'shopping' }
+    }
     return null
 }
 

@@ -1,6 +1,59 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { clearWriteChain, enqueueWrite } from './item.mjs'
+import { clearWriteChain, enqueueWrite, waitForAuthorizedWritable } from './item.mjs'
+
+test('an authorized writer gets a bounded update chance during a writer-set reconfiguration', async () => {
+    const writerKey = '11'.repeat(32)
+    let writable = false
+    let updates = 0
+    const view = {
+        autobase: {
+            closing: false,
+            local: { key: Buffer.from(writerKey, 'hex') },
+            get writable () { return writable },
+            async update () { updates += 1; writable = true },
+        },
+        membershipState: { writers: new Set([writerKey]) },
+    }
+
+    assert.equal(await waitForAuthorizedWritable(view), true)
+    assert.equal(updates, 1)
+})
+
+test('an unknown writer is refused without attempting writable recovery', async () => {
+    let updates = 0
+    const view = {
+        autobase: {
+            closing: false,
+            writable: false,
+            local: { key: Buffer.from('22'.repeat(32), 'hex') },
+            async update () { updates += 1 },
+        },
+        membershipState: { writers: new Set() },
+    }
+
+    assert.equal(await waitForAuthorizedWritable(view), false)
+    assert.equal(updates, 0)
+})
+
+test('authorized writable recovery keeps observing beyond one update-cycle timeout', async () => {
+    const writerKey = '33'.repeat(32)
+    let writable = false
+    const view = {
+        autobase: {
+            closing: false,
+            local: { key: Buffer.from(writerKey, 'hex') },
+            get writable () { return writable },
+            async update () {
+                await new Promise((resolve) => setTimeout(resolve, 500))
+                writable = true
+            },
+        },
+        membershipState: { writers: new Set([writerKey]) },
+    }
+
+    assert.equal(await waitForAuthorizedWritable(view), true)
+})
 
 test('the shared write queue refuses before invoking a writer when its base is closing', async () => {
     const ctx = {

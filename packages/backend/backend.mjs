@@ -63,7 +63,8 @@ import { epochKeyring as stateEpochKeyring } from './lib/state.mjs'
 import { isPersonalContext, createBaseContext } from './lib/base-context.mjs'
 import { buildSyncListPayload } from './lib/sync-list-payload.mjs'
 import { createBaseManager } from './lib/base-manager.mjs'
-import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, sharedListIdentity, rebuildSharedListFromView, persistSharedSecrets, autoOpenSharedBase, authorizeWriterOnSharedBase } from './lib/shared-base.mjs'
+import { settlesWithin, writeRouteAfterReconcile } from './lib/write-route.mjs'
+import { openSharedBase, closeSharedBase, bootstrapSharedOwner, setupSharedPairing, createSharedInvite, seedSharedBase, joinSharedBaseViaInvite, sharedDirNameForInvite, findSharedContextForInvite, sharedListIdentity, rebuildSharedListFromView, persistSharedSecrets, autoOpenSharedBase, authorizeWriterOnSharedBase } from './lib/shared-base.mjs'
 import { reduceRegistry, isRegistryItem, REG_KIND_LIST, buildListMetaItem } from './lib/list-registry.mjs'
 import { planOrphanedListHeals, tombstonedFromLog } from './lib/orphan-heal.mjs'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE } from '@listam/domain/identity'
@@ -146,6 +147,10 @@ let _reconcileTimer = null
 // resolveWriteContext sentinel: a shared base was named but is not open, so the
 // write must be refused rather than silently written to the personal base.
 const WRITE_REFUSED = Symbol('write-refused')
+// Desktop abandons ordinary worker requests after 12 s. Route recovery must
+// finish well inside that boundary so a refused ADD can never append later,
+// after the user has already retried it.
+const WRITE_ROUTE_RECOVERY_MS = 1000
 
 export function createBackendPaths(platform, argv = platform.argv ?? []) {
     const join = platform.join
@@ -405,21 +410,21 @@ async function handleFrontendRequest(req, error) {
                     replyMutationResult(req, await addItem(payload))
                     break
                 }
-                const route = resolveWriteContext(payload)
+                const route = await resolveWriteContext(payload)
                 if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
                 replyMutationResult(req, await addItem(payload?.text, payload?.listId, payload?.listType, payload, route))
                 break
             }
             case RPC_UPDATE: {
                 const data = JSON.parse(req.data.toString())
-                const route = resolveWriteContext(data.item)
+                const route = await resolveWriteContext(data.item)
                 if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
                 replyMutationResult(req, await updateItem(data.item, route))
                 break
             }
             case RPC_DELETE: {
                 const data = JSON.parse(req.data.toString())
-                const route = resolveWriteContext(data.item)
+                const route = await resolveWriteContext(data.item)
                 if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
                 replyMutationResult(req, await deleteItem(data.item, route))
                 break
@@ -430,12 +435,12 @@ async function handleFrontendRequest(req, error) {
                 // SOURCE item's base. A cross-base move (source and destination
                 // in different bases) is not supported — refuse it rather than
                 // append the destination into the source base (silent misfile).
-                const route = resolveWriteContext(data.item)
+                const route = await resolveWriteContext(data.item)
                 if (route === WRITE_REFUSED) { replyMutationResult(req, false); break }
                 // The destination base is whatever the TARGET list maps to; if it
                 // differs from the source's base the move would land the copy in
                 // the wrong base, so refuse it.
-                const destRoute = resolveWriteContext({ listId: data.targetListId })
+                const destRoute = await resolveWriteContext({ listId: data.targetListId })
                 if (destRoute === WRITE_REFUSED || destRoute !== route) {
                     logger.log('[WARNING] MOVE refused; cross-base moves are not supported')
                     replyMutationResult(req, false)
@@ -535,6 +540,13 @@ async function handleFrontendRequest(req, error) {
                 setCurrentList(rebuiltList)
                 syncListToFrontend(rebuiltList)
                 projectItemsToFrontend(await rebuildExtraListItems())
+                // Shared-base boot projections can be emitted before a newly
+                // mounted renderer/mobile listener is attached. Re-publish an
+                // exact snapshot for EVERY open shared list during the explicit
+                // catch-up too; otherwise a restart restores the registry shell
+                // but leaves its rows looking deleted until another mutation
+                // happens to arrive.
+                await syncSharedListsToFrontend()
                 broadcastMembershipRoster()
                 broadcastBaseState()
                 // Foreground catch-up doubles as an immediate online assertion.
@@ -1091,6 +1103,57 @@ function projectSharedListToFrontend (ctx) {
     }
 }
 
+// Authoritative catch-up for shared single-list bases. Unlike the incremental
+// boot projection above, SYNC_LIST carries the bucket identity + base key and
+// remains meaningful when the list is empty, so clients can replace exactly
+// that shared bucket without touching personal or other shared lists.
+async function syncSharedListsToFrontend () {
+    if (!rpc || !baseManager) return
+
+    // Snapshot only contexts that are already open. Full reconciliation can
+    // perform network joins/authorization and wait indefinitely on a degraded
+    // base; an explicit renderer recovery must stay read-only and bounded. A
+    // concurrently opening base projects on open and joins the next catch-up.
+    for (const ctx of baseManager.list()) {
+        if (!ctx?.autobase || ctx.autobase.closing) continue
+        try {
+            // Do not await autobase.update() here: in a degraded writer-set or
+            // offline state it can remain pending beyond the renderer's request
+            // timeout and trigger a worker-restart loop. Catch-up is defined over
+            // the already-committed durable view; normal replication advances it.
+            const rebuilt = await rebuildSharedListFromView(ctx)
+            // An exact bucket is deletion-authoritative. Never publish a partial
+            // view after even one unreadable block; keep the client's prior rows
+            // and let the checkpoint retry the full scan on the next catch-up.
+            if (!rebuilt) continue
+            const identity = await sharedListIdentity(ctx)
+            if (!identity?.listId || !identity?.type) {
+                logger.log('[WARNING] Shared sync skipped; list identity is unavailable', {
+                    baseKey: ctx.baseId?.slice?.(0, 16),
+                })
+                continue
+            }
+
+            const baseKeyHex = ctx.baseKey ? b4a.toString(ctx.baseKey, 'hex') : ctx.baseId
+            const payload = buildSyncListPayload({
+                role: ctx.role,
+                baseKeyHex,
+                operation: {
+                    type: 'list',
+                    listId: identity.listId,
+                    listType: identity.type,
+                    value: ctx.currentList,
+                },
+                currentList: ctx.currentList,
+            })
+            rpc.request(SYNC_LIST).send(JSON.stringify(payload))
+            broadcastMembershipRoster(ctx)
+        } catch (e) {
+            logger.log('[ERROR] Failed to sync shared list to frontend:', e)
+        }
+    }
+}
+
 // reconcile() asks the manager to open a registry-referenced shared base that is
 // not already open. Three cases:
 //  - LOCAL (an index entry + per-base secrets on disk): a base shared/joined in a
@@ -1470,12 +1533,12 @@ function scheduleReconcileSharedBases () {
     }, 0)
 }
 
-// Decide which base a mutation targets. An explicit payload.baseKey wins;
-// otherwise the listId → shared-base index (from the personal registry's
-// regBaseKey) is consulted. A named-but-not-open base REFUSES the write rather
-// than letting it fall through to the personal base (which would file the item
-// in the wrong base). No key named → personal base (returns null).
-function resolveWriteContext (payload) {
+// Decide which base a mutation targets. The personal registry's listId →
+// base mapping is authoritative; payload.baseKey is an immediate UI hint while
+// that replicated mapping is catching up. A named-but-not-open base gets one
+// reconciliation attempt, then REFUSES rather than falling through to the
+// personal base (which would file the item in the wrong base).
+async function resolveWriteContext (payload) {
     if (!payload || typeof payload !== 'object') return null
     // The built-in Groceries/Board/Todo surfaces multiplex listId 'default' and
     // are never shareable, so writes to 'default' ALWAYS belong to the personal
@@ -1485,10 +1548,49 @@ function resolveWriteContext (payload) {
     // every built-in write). The orphan-heal still detects + repairs the registry.
     if (payload.listId === DEFAULT_LIST_ID) return null
     const explicit = typeof payload.baseKey === 'string' && payload.baseKey ? payload.baseKey : null
-    const key = explicit || (payload.listId ? _listIdToBaseKey.get(payload.listId) : null) || null
+    const mapped = payload.listId ? _listIdToBaseKey.get(payload.listId) : null
+    const key = mapped || explicit || null
     if (!key) return null
-    const ctx = baseManager ? baseManager.get(key) : null
+    let ctx = baseManager ? baseManager.get(key) : null
+    if (!ctx && baseManager) {
+        const reconciled = await settlesWithin(reconcileSharedBases(), WRITE_ROUTE_RECOVERY_MS)
+        if (!reconciled) return WRITE_REFUSED
+        const refreshed = payload.listId ? _listIdToBaseKey.get(payload.listId) : null
+        const route = writeRouteAfterReconcile({
+            mappedBefore: mapped,
+            requestedKey: key,
+            mappedAfter: refreshed,
+        })
+        if (route.personal) return null
+        ctx = route.key ? baseManager.get(route.key) : null
+    }
     return ctx || WRITE_REFUSED
+}
+
+// The personal context deliberately projects only the built-in/default bucket.
+// A shared context, however, holds one usually-NAMED list plus a registry
+// descriptor in a different bucket. Remember that canonical list id and reduce
+// operations against it; otherwise every named shared base's currentList stays
+// empty even while its durable view contains the items.
+function applyOperationToContextList (ctx, operation) {
+    if (isPersonalContext(ctx)) return applyOperationToList(ctx.currentList, operation)
+
+    if (!ctx.sharedListId) {
+        const values = operation?.type === 'list'
+            ? (Array.isArray(operation.value) ? operation.value : [])
+            : [operation?.value]
+        const descriptor = values.find((item) => isRegistryItem(item) && item.regKind === REG_KIND_LIST)
+        if (typeof descriptor?.id === 'string' && descriptor.id) {
+            ctx.sharedListId = descriptor.id
+        } else if (!values.some(isRegistryItem) && typeof operation?.listId === 'string' && operation.listId) {
+            ctx.sharedListId = operation.listId
+        }
+    }
+
+    return applyOperationToList(ctx.currentList, operation, {
+        selectedListId: ctx.sharedListId || operation?.listId,
+        listType: operation?.listType,
+    })
 }
 
 // Promote a personal list into its OWN shared base and mint a co-edit invite.
@@ -1685,6 +1787,70 @@ async function shareList (listId, requestedType = null, requestedName = null) {
     return { ok: true, invite, baseKey: baseKeyHex, listId: targetListId }
 }
 
+// Finish either a fresh invite join or an idempotent reuse of an already-open
+// base. The latter is the normal case when this device first auto-joined from
+// propagated project credentials and the user subsequently scans an invite.
+async function finishJoinedList (ctx, baseKeyHex, { reused = false } = {}) {
+    // Adopt the shared list's CANONICAL id from the base's own self-describing
+    // registry meta-item (or, fallback, a replicated item). Never invent a
+    // synthetic id — one that didn't match the real listId would, once the real
+    // items arrived, route their writes to the personal base.
+    let identity = null
+    const deadline = Date.now() + 15000
+    while (!identity && Date.now() < deadline) {
+        try { await ctx.autobase.update() } catch (_) {}
+        identity = await sharedListIdentity(ctx)
+        if (!identity) await new Promise((r) => setTimeout(r, 250))
+    }
+    if (!identity) return { ok: false, reason: 'join-timeout' }
+
+    // A shared base claiming the reserved 'default' listId would multiplex onto
+    // built-in surfaces and route their writes into it.
+    if (identity.listId === DEFAULT_LIST_ID) {
+        logger.log('[WARNING] join-list refused; shared base claims the reserved built-in listId', { listId: identity.listId })
+        return { ok: false, reason: 'cannot-join-builtin' }
+    }
+
+    // A matching personal registry entry is already present for an auto-opened
+    // context; keep its group/order metadata instead of emitting a newer partial
+    // descriptor. A missing entry is the ordinary fresh-invite path.
+    const registry = reduceRegistry(await rebuildAllItems())
+    const existingMeta = registry.lists.find((l) => l.id === identity.listId) || null
+    if (existingMeta && (existingMeta.baseKey || null) !== baseKeyHex) {
+        logger.log('[WARNING] join-list refused; listId already in use by another list', { listId: identity.listId })
+        return { ok: false, reason: 'list-id-conflict' }
+    }
+
+    const previousRoute = _listIdToBaseKey.get(identity.listId) || null
+    _listIdToBaseKey.set(identity.listId, baseKeyHex)
+    if (!existingMeta) {
+        const regOk = await updateItem(buildListMetaItem({ id: identity.listId, name: identity.name, type: identity.type, baseKey: baseKeyHex, updatedAt: Date.now() }))
+        if (!regOk) {
+            if (previousRoute) _listIdToBaseKey.set(identity.listId, previousRoute)
+            else _listIdToBaseKey.delete(identity.listId)
+            return { ok: false, reason: 'registry-write-failed' }
+        }
+    }
+
+    await rebuildSharedListFromView(ctx)
+    projectSharedListToFrontend(ctx)
+    broadcastMembershipRoster(ctx) // surface the joined base's membership to the UI
+    const writable = !!ctx.autobase?.writable
+    logger.log(reused ? '[INFO] Reused already-open shared list' : '[INFO] Joined shared list', {
+        listId: identity.listId,
+        baseKey: baseKeyHex.slice(0, 16),
+        writable,
+    })
+    return { ok: true, baseKey: baseKeyHex, listId: identity.listId, writable }
+}
+
+async function discardJoinedListContext (ctx, baseKeyHex) {
+    if (!ctx) return
+    if (baseKeyHex && baseManager?.get(baseKeyHex) === ctx) baseManager.remove(baseKeyHex)
+    try { clearWriteChain(ctx) } catch (_) {}
+    try { await closeSharedBase(ctx) } catch (_) {}
+}
+
 // Additively join a shared list's base via its invite (NOT the destructive
 // whole-project join). Adds a personal registry entry pointing at the joined
 // base so it appears in the nav and routes writes there.
@@ -1695,7 +1861,23 @@ async function joinList (invite) {
     if (!dirName) return { ok: false, reason: 'bad-invite' }
     let ctx = null
     let baseKeyHex = null
+    let disposeOnFailure = false
     try {
+        // Do this BEFORE blind pairing. Pairing first would append a durable
+        // second writer membership record even if we discarded the new context
+        // afterwards, leaving a ghost indexer in the base forever.
+        const existing = findSharedContextForInvite(baseManager.list(), invite)
+        if (existing) {
+            ctx = existing
+            baseKeyHex = existing.baseId || b4a.toString(existing.autobase.key, 'hex')
+            // A paired device may have auto-opened this base read-only and
+            // already requested authorization. Reuse that SAME context even
+            // while the request is pending; pairing a second Corestore here
+            // would mint another writer identity and leave the first request
+            // able to authorize a permanent ghost writer later.
+            return await finishJoinedList(ctx, baseKeyHex, { reused: true })
+        }
+
         const joined = await joinSharedBaseViaInvite(createBaseContext, {
             invite,
             storageDir: sharedStorageDir(dirName),
@@ -1703,77 +1885,19 @@ async function joinList (invite) {
         })
         ctx = joined.ctx
         baseKeyHex = joined.baseKeyHex
-        const writable = joined.writable
+        disposeOnFailure = true
         baseManager.register(baseKeyHex, ctx)
         recordSharedBaseDir(baseKeyHex, dirName) // so reconcile reopens it on restart
 
-        // Adopt the shared list's CANONICAL id from the base's own self-describing
-        // registry meta-item (or, fallback, a replicated item). Never invent a
-        // synthetic id — one that didn't match the real listId would, once the
-        // real items arrived, route their writes to the personal base. Fail the
-        // join if nothing has described the list within the window.
-        let identity = null
-        const deadline = Date.now() + 15000
-        while (!identity && Date.now() < deadline) {
-            try { await ctx.autobase.update() } catch (_) {}
-            identity = await sharedListIdentity(ctx)
-            if (!identity) await new Promise((r) => setTimeout(r, 250))
+        const result = await finishJoinedList(ctx, baseKeyHex)
+        if (!result.ok) {
+            await discardJoinedListContext(ctx, baseKeyHex)
+            disposeOnFailure = false
         }
-        if (!identity) {
-            baseManager.remove(baseKeyHex)
-            clearWriteChain(ctx)
-            await closeSharedBase(ctx)
-            return { ok: false, reason: 'join-timeout' }
-        }
-
-        // A shared base claiming the reserved 'default' listId would multiplex
-        // onto the built-in Groceries/Board/Todo surfaces (and route their writes
-        // into it). Refuse — 'default' is never base-routed (see resolveWriteContext).
-        if (identity.listId === DEFAULT_LIST_ID) {
-            logger.log('[WARNING] join-list refused; shared base claims the reserved built-in listId', { listId: identity.listId })
-            baseManager.remove(baseKeyHex)
-            clearWriteChain(ctx)
-            await closeSharedBase(ctx)
-            return { ok: false, reason: 'cannot-join-builtin' }
-        }
-
-        // listId-collision guard: if this id already names a DIFFERENT list in
-        // your registry (a personal list, or another shared base), joining would
-        // collide — the registry and items key by listId. Refuse rather than
-        // corrupt. (True re-id with item remapping is a follow-up; re-joining the
-        // SAME base is fine — its baseKey matches.)
-        const clash = reduceRegistry(await rebuildAllItems()).lists
-            .find((l) => l.id === identity.listId && (l.baseKey || null) !== baseKeyHex)
-        if (clash) {
-            logger.log('[WARNING] join-list refused; listId already in use by another list', { listId: identity.listId })
-            baseManager.remove(baseKeyHex)
-            clearWriteChain(ctx)
-            await closeSharedBase(ctx)
-            return { ok: false, reason: 'list-id-conflict' }
-        }
-
-        _listIdToBaseKey.set(identity.listId, baseKeyHex)
-        const regOk = await updateItem(buildListMetaItem({ id: identity.listId, name: identity.name, type: identity.type, baseKey: baseKeyHex, updatedAt: Date.now() }))
-        if (!regOk) {
-            _listIdToBaseKey.delete(identity.listId)
-            baseManager.remove(baseKeyHex)
-            clearWriteChain(ctx)
-            await closeSharedBase(ctx)
-            return { ok: false, reason: 'registry-write-failed' }
-        }
-
-        await rebuildSharedListFromView(ctx)
-        projectSharedListToFrontend(ctx)
-        broadcastMembershipRoster(ctx) // surface the joined base's membership to the UI
-        logger.log('[INFO] Joined shared list', { listId: identity.listId, baseKey: baseKeyHex.slice(0, 16), writable })
-        return { ok: true, baseKey: baseKeyHex, listId: identity.listId, writable }
+        return result
     } catch (e) {
         logger.log('[ERROR] joinList failed:', e)
-        if (ctx) {
-            if (baseKeyHex) baseManager.remove(baseKeyHex)
-            try { clearWriteChain(ctx) } catch (_) {}
-            try { await closeSharedBase(ctx) } catch (_) {}
-        }
+        if (disposeOnFailure) await discardJoinedListContext(ctx, baseKeyHex)
         return { ok: false, reason: 'join-failed' }
     }
 }
@@ -2022,7 +2146,7 @@ export async function apply (ctx, nodes, view, host) {
             }
             logger.log('[INFO] Applying add operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
-            ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
+            ctx.setCurrentList(applyOperationToContextList(ctx, operation))
             if (!internalItem) pushFromBackend(ctx, RPC_ADD_FROM_BACKEND, operation.value)
             continue
         }
@@ -2034,7 +2158,7 @@ export async function apply (ctx, nodes, view, host) {
             }
             logger.log('[INFO] Applying delete operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
-            ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
+            ctx.setCurrentList(applyOperationToContextList(ctx, operation))
             if (!internalItem) pushFromBackend(ctx, RPC_DELETE_FROM_BACKEND, operation.value)
             continue
         }
@@ -2046,7 +2170,7 @@ export async function apply (ctx, nodes, view, host) {
             }
             logger.log('[INFO] Applying update operation for item:', operation.value)
             await view.append(createListViewEntry(operation))
-            ctx.setCurrentList(applyOperationToList(ctx.currentList, operation))
+            ctx.setCurrentList(applyOperationToContextList(ctx, operation))
             if (!internalItem) pushFromBackend(ctx, RPC_UPDATE_FROM_BACKEND, operation.value)
             continue
         }
@@ -2058,7 +2182,7 @@ export async function apply (ctx, nodes, view, host) {
             }
             logger.log('[INFO] Applying list operation for items:', operation.value)
             await view.append(createListViewEntry(operation))
-            const nextList = applyOperationToList(ctx.currentList, operation)
+            const nextList = applyOperationToContextList(ctx, operation)
             ctx.setCurrentList(nextList)
             if (rpc && !internalItem) {
                 const listPayload = buildSyncListPayload({

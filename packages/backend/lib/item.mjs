@@ -83,6 +83,8 @@ function ctxView (ctx) {
 const FLUSHABLE_WAIT_MS = 4000
 const FLUSHABLE_POLL_MS = 200
 const FLUSHABLE_UPDATE_WAIT_MS = 500
+const WRITABLE_RECOVERY_WAIT_MS = 1200
+const WRITABLE_RECOVERY_UPDATE_WAIT_MS = 300
 
 export async function waitForFlushableWriter (view) {
     const v = view || ctxView(null)
@@ -287,6 +289,55 @@ function localWriterKeyHex (ab = autobase) {
     }
 }
 
+// Autobase can briefly report writable=false while it installs a newly
+// authorized writer set. If the owner-signed membership already includes this
+// exact local writer, give bounded update cycles a chance to finish that reorg
+// before telling the UI it cannot write. An unknown/removed writer still fails
+// immediately, and a stuck update is never awaited without a deadline.
+export async function waitForAuthorizedWritable (view) {
+    const v = view || ctxView(null)
+    if (v.autobase?.writable) return true
+
+    const localKey = localWriterKeyHex(v.autobase)
+    if (!localKey || !v.membershipState?.writers?.has(localKey)) return false
+
+    const deadline = Date.now() + WRITABLE_RECOVERY_WAIT_MS
+    while (Date.now() < deadline) {
+        const ab = v.autobase
+        if (!ab || ab.closing) return false
+        if (ab.writable) return true
+
+        let timer = null
+        const settled = await Promise.race([
+            Promise.resolve()
+                .then(() => ab.update())
+                .then(() => true, (e) => {
+                    logger.log('[WARNING] autobase.update failed while recovering authorized writer:', e?.message ?? e)
+                    return true
+                }),
+            new Promise((resolve) => {
+                timer = setTimeout(() => resolve(false), WRITABLE_RECOVERY_UPDATE_WAIT_MS)
+            }),
+        ])
+        if (timer) clearTimeout(timer)
+        if (!settled) {
+            // Keep observing the SAME in-flight update until the outer recovery
+            // deadline. Returning at the per-cycle timeout made the advertised
+            // 1.2 s window only 300 ms and still refused ordinary writer-set
+            // installs that completed a moment later.
+            logger.log('[WARNING] autobase.update is still pending while recovering authorized writer')
+            while (Date.now() < deadline) {
+                if (v.autobase?.writable) return true
+                await new Promise((resolve) => setTimeout(resolve, 50))
+            }
+            return !!v.autobase?.writable
+        }
+        if (ab.writable) return true
+        await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    return !!v.autobase?.writable
+}
+
 function findCurrentItem (item, list = currentList) {
     if (!Array.isArray(list)) return null
     const id = item?.id
@@ -301,7 +352,7 @@ export async function addItem (text, listId = DEFAULT_LIST_ID, listType = DEFAUL
         return false
     }
 
-    if (!v.autobase.writable) {
+    if (!(await waitForAuthorizedWritable(v))) {
         logger.log('[WARNING] addItem called but autobase is not writable yet - waiting to be added as writer')
         // Notify frontend about not being writable
         try {
@@ -412,7 +463,7 @@ export async function updateItem (item, ctx = null) {
         return false
     }
 
-    if (!v.autobase.writable) {
+    if (!(await waitForAuthorizedWritable(v))) {
         logger.log('[WARNING] updateItem called but autobase is not writable yet')
         try {
             const req = rpc.request(RPC_MESSAGE)
@@ -473,7 +524,7 @@ export async function deleteItem (item, ctx = null) {
         return false
     }
 
-    if (!v.autobase.writable) {
+    if (!(await waitForAuthorizedWritable(v))) {
         logger.log('[WARNING] deleteItem called but autobase is not writable yet')
         try {
             const req = rpc.request(RPC_MESSAGE)
@@ -533,7 +584,7 @@ export async function moveItem (payload, ctx = null) {
         return false
     }
 
-    if (!v.autobase.writable) {
+    if (!(await waitForAuthorizedWritable(v))) {
         logger.log('[WARNING] moveItem called but autobase is not writable yet')
         try {
             const req = rpc.request(RPC_MESSAGE)

@@ -137,7 +137,7 @@ test('membership records are collected once each and excluded from the list redu
     assert.equal(second.membershipRecords.length, 2, 'resume must not re-collect already-seen records')
 })
 
-test('an unreadable entry is reported and skipped without corrupting the resume state', async () => {
+test('an unreadable entry reports an incomplete result and forces a full retry', async () => {
     const readError = new Error('block read failed')
     const view = createFakeView([addEntry('a', 'Milk'), readError, addEntry('c', 'Eggs')])
     const checkpoint = createViewCheckpoint()
@@ -146,11 +146,17 @@ test('an unreadable entry is reported and skipped without corrupting the resume 
     const result = await checkpoint.update(view, { onError: (index) => errors.push(index) })
 
     assert.deepEqual(errors, [1])
+    assert.equal(result.complete, false)
     assert.deepEqual(result.items.map((entry) => entry.text), ['Eggs', 'Milk'])
 
+    // Once the missing block becomes readable, the next pass starts from zero
+    // and recovers it; the checkpoint never advances permanently past the gap.
+    view.entries[1] = addEntry('b', 'Bread')
     view.entries.push(addEntry('d', 'Cheese'))
     const next = await checkpoint.update(view)
-    assert.deepEqual(next.items.map((entry) => entry.text), ['Cheese', 'Eggs', 'Milk'])
+    assert.equal(next.complete, true)
+    assert.equal(next.resumedFrom, 0)
+    assert.deepEqual(next.items.map((entry) => entry.text), ['Cheese', 'Eggs', 'Bread', 'Milk'])
 })
 
 test('reset discards the checkpoint so the next pass replays from index 0', async () => {

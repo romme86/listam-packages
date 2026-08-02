@@ -83,6 +83,9 @@ export function createBaseContext ({ role = 'shared', baseId = null, baseKey = n
         inviteUsesRemaining: 0,
 
         // In-memory data (per base)
+        // Canonical list bucket held by this single-list shared base. Learned
+        // from its self-describing registry item (or first real operation).
+        sharedListId: null,
         currentList: [],
         peerCount: 0,
         knownWriters: new Set(),

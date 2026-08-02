@@ -57,7 +57,7 @@ test('shared base: A shares + seeds, B joins as writer, both edit, converges', a
         assert.equal(ctxA.autobase.writable, true)
         setupSharedPairing(ctxA)
         await seedSharedBase(ctxA, [
-            { id: 'm1', text: 'Milk', isDone: false, timeOfCompletion: 0, listId: 'default', listType: 'shopping', updatedAt: 1 },
+            { id: 'm1', text: 'Milk', isDone: false, timeOfCompletion: 0, listId: 'spesa-2', listType: 'shopping', updatedAt: 1 },
         ])
         assert.deepEqual(texts(ctxA), ['Milk'])
 
@@ -77,8 +77,8 @@ test('shared base: A shares + seeds, B joins as writer, both edit, converges', a
         assert.equal(sawSeed, true, 'B replicated the seeded Milk')
 
         // --- Both edit; the bases converge (LWW) ---
-        assert.equal(await addItem('Eggs', 'default', 'shopping', null, ctxA), true)
-        assert.equal(await addItem('Bread', 'default', 'shopping', null, ctxB), true)
+        assert.equal(await addItem('Eggs', 'spesa-2', 'shopping', null, ctxA), true)
+        assert.equal(await addItem('Bread', 'spesa-2', 'shopping', null, ctxB), true)
 
         const want = ['Bread', 'Eggs', 'Milk']
         const converged = await waitFor(async () => {
@@ -106,7 +106,7 @@ test('shared base survives reopen: secrets persist, membership rebuilds, epoch w
     await bootstrapSharedOwner(ctx1)
     assert.equal(ctx1.membershipState.currentEpoch, 1, 'epoch 1 after bootstrap')
     await seedSharedBase(ctx1, [
-        { id: 'm1', text: 'Milk', isDone: false, timeOfCompletion: 0, listId: 'default', listType: 'shopping', updatedAt: 1 },
+        { id: 'm1', text: 'Milk', isDone: false, timeOfCompletion: 0, listId: 'spesa-2', listType: 'shopping', updatedAt: 1 },
     ])
     assert.deepEqual(texts(ctx1), ['Milk'])
     assert.ok(createSharedInvite(ctx1), 'owner mints an invite pre-restart')
@@ -129,7 +129,7 @@ test('shared base survives reopen: secrets persist, membership rebuilds, epoch w
 
         // A new epoch-encrypted write applies AND decrypts — only possible if the
         // epoch key was correctly persisted and reloaded.
-        assert.equal(await addItem('Eggs', 'default', 'shopping', null, ctx2), true)
+        assert.equal(await addItem('Eggs', 'spesa-2', 'shopping', null, ctx2), true)
         await ctx2.autobase.update()
         assert.deepEqual(texts(ctx2), ['Eggs', 'Milk'], 'post-restart epoch write round-trips')
     } finally {

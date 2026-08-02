@@ -48,8 +48,8 @@ export function createViewCheckpoint() {
 
     // Scan the view and return the reduced list plus the control records seen
     // so far. `onError(index, error)` reports unreadable entries; the scan
-    // skips them (matching the previous full-replay behavior) and a later pass
-    // self-corrects via the resume verification above.
+    // reports a partial result for diagnostics, then resets so a later pass
+    // retries the full view instead of checkpointing past a missing entry.
     async function update(view, { onError } = {}) {
         if (!view) {
             return {
@@ -60,6 +60,7 @@ export function createViewCheckpoint() {
                 compactionRecords: [...compactionRecords],
                 resumedFrom: processedLength,
                 scanned: 0,
+                complete: true,
             }
         }
 
@@ -67,12 +68,14 @@ export function createViewCheckpoint() {
         if (!resumed) reset()
         const start = processedLength
         let scanned = 0
+        let complete = true
 
         for (let i = start; i < view.length; i++) {
             let entry = null
             try {
                 entry = await view.get(i)
             } catch (error) {
+                complete = false
                 onError?.(i, error)
             }
             scanned++
@@ -89,7 +92,7 @@ export function createViewCheckpoint() {
             processedLength = i + 1
         }
 
-        return {
+        const result = {
             items: reduction.items(),
             allItems: reduction.allItems(),
             membershipRecords: [...membershipRecords],
@@ -97,7 +100,14 @@ export function createViewCheckpoint() {
             compactionRecords: [...compactionRecords],
             resumedFrom: start,
             scanned,
+            complete,
         }
+        // Never checkpoint past an unreadable middle entry. Returning the
+        // partial reduction lets diagnostic callers inspect what was readable,
+        // but the next pass must retry the whole view instead of treating the
+        // missing row as durably absent.
+        if (!complete) reset()
+        return result
     }
 
     return { update, reset }
