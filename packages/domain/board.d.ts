@@ -147,3 +147,17 @@ export function tableAddRow (rows: unknown): string[][]
 export function tableAddColumn (rows: unknown): string[][]
 export function tableRemoveRow (rows: unknown, at: number): string[][]
 export function tableRemoveColumn (rows: unknown, at: number): string[][]
+
+// --- Draft tickets -----------------------------------------------------------
+
+export function buildDraftTicket (opts?: {
+    id?: string
+    listId?: string
+    listType?: string
+    createdBy?: string | null
+    fields?: Record<string, unknown> | null
+    now?: number
+}): Record<string, unknown> | null
+export function isDraftTicket (item: unknown): boolean
+export function canChangeTicketStatus (item: unknown, config?: Partial<BoardConfig> | null): { ok: boolean; missing: string[] }
+export function commitDraftTicket <T = Ticket>(item: T | null | undefined, now?: number): T | null

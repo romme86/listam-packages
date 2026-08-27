@@ -26,6 +26,10 @@ import {
     createBlock,
     blockToText,
     blockFromText,
+    buildDraftTicket,
+    isDraftTicket,
+    canChangeTicketStatus,
+    commitDraftTicket,
 } from './board.mjs'
 
 const HOUR = 3600000
@@ -361,4 +365,85 @@ test('markdown block with headings round-trips verbatim through blockToText/bloc
     assert.equal(blockToText(block), block.text)
     assert.deepEqual(blockFromText('markdown', blockToText(block)), { text: block.text })
     assert.deepEqual(normalizeBlocks([block]), [block])
+})
+
+// --- draft tickets -----------------------------------------------------------
+
+test('buildDraftTicket carries every field normalizeListItem requires', () => {
+    const draft = buildDraftTicket({ id: 'd1', listId: 'work', createdBy: 'aa11', now: 1000 })
+    assert.equal(typeof draft.text, 'string')
+    assert.equal(typeof draft.isDone, 'boolean')
+    assert.equal(typeof draft.timeOfCompletion, 'number')
+    assert.equal(draft.id, 'd1')
+    assert.equal(draft.listId, 'work')
+    assert.equal(draft.listType, LEGACY_BOARD_LIST_TYPE)
+    assert.equal(draft.status, 'todo')
+    assert.equal(draft.createdBy, 'aa11')
+    assert.equal(draft.updatedAt, 1000)
+    assert.equal(draft.timestamp, 1000)
+    assert.equal(draft.draft, true)
+    assert.equal(buildDraftTicket({ id: '   ' }), null)
+    assert.equal(buildDraftTicket(), null)
+})
+
+test('buildDraftTicket seeds extra fields without losing the required ones', () => {
+    const draft = buildDraftTicket({ id: 'd2', listId: 'work', fields: { estimatedComplexity: 50, valueRate: 4 } })
+    assert.equal(draft.estimatedComplexity, 50)
+    assert.equal(draft.valueRate, 4)
+    assert.equal(draft.draft, true)
+    assert.equal(draft.text, '')
+})
+
+test('isDraftTicket is true only for board tickets explicitly marked draft', () => {
+    assert.equal(isDraftTicket(buildDraftTicket({ id: 'd3', listId: 'l' })), true)
+    assert.equal(isDraftTicket({ listType: LEGACY_BOARD_LIST_TYPE, draft: false }), false)
+    assert.equal(isDraftTicket({ listType: LEGACY_BOARD_LIST_TYPE }), false)
+    // A draft flag on a non-board item means nothing.
+    assert.equal(isDraftTicket({ listType: 'shopping', draft: true }), false)
+    assert.equal(isDraftTicket(null), false)
+})
+
+test('canChangeTicketStatus pins an incomplete draft only while rigor is on', () => {
+    const draft = buildDraftTicket({ id: 'd4', listId: 'l' })
+
+    const gated = canChangeTicketStatus(draft, DEFAULT_BOARD_CONFIG)
+    assert.equal(gated.ok, false)
+    assert.deepEqual(gated.missing.sort(), ['checklist', 'complexity', 'description', 'hours'])
+
+    // Rigor off: nothing to satisfy, so the draft moves like any other ticket.
+    assert.deepEqual(canChangeTicketStatus(draft, { rigorOn: false }), { ok: true, missing: [] })
+
+    // A complete draft is free to move even under rigor.
+    const complete = {
+        ...draft,
+        description: 'Ship it',
+        checklist: [{ id: 't', text: 'Write it', done: false }],
+        estimatedHours: 4,
+        estimatedComplexity: 60,
+    }
+    assert.equal(canChangeTicketStatus(complete, DEFAULT_BOARD_CONFIG).ok, true)
+})
+
+test('canChangeTicketStatus never pins a ticket that is not a draft', () => {
+    // An ordinary ticket that would FAIL the rigor gate still moves: rigor is a
+    // creation gate, and this one already exists (legacy, or written before
+    // rigor was turned on).
+    const legacy = { id: 'x', text: 'old', listType: LEGACY_BOARD_LIST_TYPE, status: 'todo' }
+    assert.deepEqual(canChangeTicketStatus(legacy, DEFAULT_BOARD_CONFIG), { ok: true, missing: [] })
+})
+
+test('canChangeTicketStatus defaults to the rigor-on config when none is given', () => {
+    assert.equal(canChangeTicketStatus(buildDraftTicket({ id: 'd5', listId: 'l' })).ok, false)
+})
+
+test('commitDraftTicket clears the mark and bumps updatedAt', () => {
+    const draft = buildDraftTicket({ id: 'd6', listId: 'l', now: 1 })
+    const committed = commitDraftTicket(draft, 99)
+    assert.equal(committed.draft, false)
+    assert.equal(committed.updatedAt, 99)
+    assert.equal(isDraftTicket(committed), false)
+    // Non-draft fields survive untouched.
+    assert.equal(committed.id, 'd6')
+    assert.equal(committed.timestamp, 1)
+    assert.equal(commitDraftTicket(null), null)
 })

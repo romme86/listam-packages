@@ -576,3 +576,79 @@ export function tableRemoveColumn (rows, at) {
     if (grid[0].length <= 1 || !Number.isInteger(at) || at < 0 || at >= grid[0].length) return grid
     return grid.map((row) => row.filter((_, i) => i !== at))
 }
+
+// ---------------------------------------------------------------------------
+// Draft tickets
+//
+// A create panel that holds its fields in throwaway UI state loses everything
+// the moment it is dismissed — an outside click, an Escape, a re-render. So the
+// panel materializes a REAL ticket the instant it opens and writes every edit
+// onto it; there is no unsaved state left to lose.
+//
+// That ticket carries `draft: true`. It is an ordinary replicated item —
+// normalizeListItem preserves unknown fields, so every peer stores and syncs the
+// flag untouched, and clients that predate it simply render it as a normal
+// ticket.
+//
+// It has to be written through the UPDATE path, which upserts and (unlike add)
+// has no rigor gate — an add of an empty ticket is refused at the writer AND
+// dropped in apply(). The gate is not bypassed, only moved: canChangeTicketStatus
+// pins a draft in its column until it satisfies validateTicketDraft, and
+// committing it clears the flag. A client that predates this will not enforce
+// the pin, which is the same forward-compat bargain every other net-new field
+// here makes.
+
+// Every field normalizeListItem REQUIRES, plus what an empty create form holds.
+// Miss one of text/isDone/timeOfCompletion and the write is silently dropped.
+export function buildDraftTicket ({
+    id,
+    listId,
+    listType = BOARD_WRITE_TYPE,
+    createdBy = null,
+    fields = null,
+    now = Date.now(),
+} = {}) {
+    if (typeof id !== 'string' || !id.trim()) return null
+    const item = {
+        id: id.trim(),
+        text: '',
+        isDone: false,
+        timeOfCompletion: 0,
+        listId,
+        listType,
+        status: 'todo',
+        description: '',
+        checklist: [],
+        inProgressMs: 0,
+        inProgressSince: null,
+        draft: true,
+        updatedAt: now,
+        timestamp: now,
+        ...(fields || {}),
+    }
+    // The backend stamps this on add; the update-as-create path has to supply it
+    // or computeCongruency cannot attribute the ticket to its author.
+    if (createdBy && !item.createdBy) item.createdBy = createdBy
+    return item
+}
+
+export function isDraftTicket (item) {
+    return isBoardTicket(item) && item.draft === true
+}
+
+// May this ticket change status? Only drafts are ever pinned, and only by the
+// rigor gate — with rigor off validateTicketDraft passes and a draft moves like
+// any other ticket. Same { ok, missing } shape as validateTicketDraft so callers
+// reuse one refusal path.
+export function canChangeTicketStatus (item, config) {
+    if (!isDraftTicket(item)) return { ok: true, missing: [] }
+    return validateTicketDraft(item, normalizeBoardConfig(config))
+}
+
+// Drop the draft mark. Written as `false` rather than deleted so the field's
+// shape stays stable across the item's life and `draft` never reads as
+// "missing, therefore unknown" to a later reader.
+export function commitDraftTicket (item, now = Date.now()) {
+    if (!item) return null
+    return { ...item, draft: false, updatedAt: now }
+}
