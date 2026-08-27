@@ -35,6 +35,14 @@ export const RPC_JOIN_LIST: 33
 export const RPC_SET_BACKUP_SCHEDULE: 34
 export const RPC_COMPACT_HISTORY: 35
 
+// 4G/CGNAT pairing remediation (2026-08-27). See index.mjs for what each one
+// exists to fix; these declarations only mirror the runtime module.
+export const RPC_CANCEL_JOIN: 36
+export const RPC_NET_SUSPEND: 37
+export const RPC_NET_RESUME: 38
+export const RPC_GET_LOG_TAIL: 39
+export const RPC_GET_NET_DIAGNOSTICS: 40
+
 export type InviteQrScope = 'project' | 'list'
 
 export type InviteQrPayload = {

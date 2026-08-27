@@ -88,6 +88,34 @@ export const RPC_SET_BACKUP_SCHEDULE = 34
 // readiness is { ready, total, readyCount, blockers[] }.
 export const RPC_COMPACT_HISTORY = 35
 
+// --- 4G/CGNAT pairing remediation (2026-08-27) -------------------------------
+//
+// CANCEL_JOIN aborts an in-flight join immediately instead of leaving the guest
+// wedged behind joinViaInvite's single-flight guard for the rest of its
+// deadline. Without it a user who retries with a fresh code silently
+// re-attaches to the stuck attempt and the OLD failure is reported against the
+// NEW code. Reply { ok, cancelled }.
+export const RPC_CANCEL_JOIN = 36
+
+// NET_SUSPEND / NET_RESUME drive hyperswarm's mobile lifecycle API. Bare Kit
+// already suspends the worklet's event loop on background, but nothing told the
+// swarm, so the DHT came back with dead UDP sockets and an expired announce —
+// a host that left the app to send an invite code stopped being reachable and
+// never recovered. Both reply { ok, suspended } / { ok, resumed }.
+export const RPC_NET_SUSPEND = 37
+export const RPC_NET_RESUME = 38
+
+// GET_LOG_TAIL returns the in-memory redacted ring buffer so a phone in the
+// field can produce a diagnostic bundle without a cable. Request { limit? },
+// reply { ok, lines: string[], dropped }.
+export const RPC_GET_LOG_TAIL = 39
+
+// GET_NET_DIAGNOSTICS snapshots the live transport state behind the header dot:
+// { ok, bootstrapped, online, firewall, randomized, punches, relaying,
+//   connections, peers, relayConfigured }. `randomized` true means this network
+// blocks direct connections (carrier NAT) and every connection must be relayed.
+export const RPC_GET_NET_DIAGNOSTICS = 40
+
 // QR invites use a non-routing URI rather than an app/web deep link. This is
 // deliberate: older Listam builds treat every deep-link invite as a destructive
 // whole-project join and cannot distinguish it from an additive single-list

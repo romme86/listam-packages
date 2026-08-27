@@ -5,7 +5,9 @@ import { apply, open, primaryContext, resetApplyMembershipCheckpoint, resetShare
 import { saveAutobaseKey, saveEncryptionKey, saveOwnerAuthorityKey, deleteOwnerAuthorityKey, saveEpochKey, deleteEpochKey, saveEpochEncryptionKey, deleteEpochEncryptionKey, deleteLegacyInviteFile, deleteLegacyKeyFile } from "./key.mjs"
 import { deleteBackendSecret, secretFingerprint } from "./secrets.mjs"
 import { describeCorruption, isCorruptionSignature, planRecoveryAction, quarantineStorageRoot } from "./recovery.mjs"
-import { INVITE_MAX_USES, isInviteUsable, reserveInviteUse, withInvitePolicy } from "./invite-policy.mjs"
+import { inviteExpiresInMs, withInvitePolicy } from "./invite-policy.mjs"
+import { addInvite, clearInvites, createInviteBook, describeInvites, findInvite, newestUsableInvite, reserveInvite } from "./invite-book.mjs"
+import { getRelayKeys, relayFingerprints, relaySwarmOptions, setRelayKeys } from "./relay.mjs"
 import { createJoinRollbackSnapshot, restoreJoinRollbackSnapshot } from "./join-rollback.mjs"
 import { createAutoBackup } from "./auto-backup.mjs"
 import { performMemberRemovalRekey } from "./rekey.mjs"
@@ -38,6 +40,7 @@ import {
     reconcileLegacyEpochEncryptionKeyPair,
 } from './key-epochs.mjs'
 import { RPC_MESSAGE, RPC_GET_KEY, SYNC_LIST } from "@listam/protocol"
+import { PAIRING_POLL_MS, JOIN_DEADLINE_MS, JOIN_HEARTBEAT_MS, DENY_STATUS, JOIN_REASON, denyStatusForReason, joinFailureReason, refineTimeoutReason } from "./pairing-tuning.mjs"
 import Corestore from "corestore"
 import Autobase from "autobase"
 import b4a from "b4a"
@@ -53,7 +56,6 @@ import {
     peerCount,
     currentList,
     pairing,
-    currentInvite,
     encryptionKey,
     ownerAuthorityKeyPair,
     epochKey,
@@ -70,7 +72,6 @@ import {
     setBaseKey,
     setPairing,
     setPairingMember,
-    setCurrentInvite,
     setCurrentList,
     setEncryptionKey,
     setOwnerAuthorityKeyPair,
@@ -90,7 +91,9 @@ import { recoverEpochKeyFromMembership } from './epoch-recovery.mjs'
 
 let _initPromise = null
 let _writableCheckTimer = null
-let inviteUsesRemaining = 0
+// Every code the owner has handed out that is still alive. One slot used to
+// mean minting a code for the second friend silently killed the first.
+const inviteBook = createInviteBook()
 let _joinedBase = false
 // RPC_REQUEST_SYNC is also fired periodically by desktop. Re-grant once per
 // owner backend/base membership+epoch generation; concurrent requests share the
@@ -242,7 +245,7 @@ function waitForWritable() {
         if (!current()) return
         endJoinWatch()
         setIsPendingJoinSuccess(false)
-        broadcastMessage(kind === 'error' ? { type: 'join-error', message } : { type: 'join-success' })
+        broadcastMessage(kind === 'error' ? { type: 'join-error', reason: JOIN_REASON.TIMEOUT, message } : { type: 'join-success' })
         broadcastNetworkStatus()
         cleanupTempSwarm()
     }
@@ -376,21 +379,25 @@ function waitForWritable() {
     void evaluate()
 }
 
-export function createInvite() {
+export function createInvite({ fresh = false } = {}) {
     if (!autobase) return null
     if (!canCreateMembershipInvite(membershipState, ownerAuthorityKeyPair)) {
-        setCurrentInvite(null)
-        inviteUsesRemaining = 0
+        clearInvites(inviteBook)
         logger.log('[WARNING] Invite creation rejected; only the owner device can create or revoke invites')
         return null
     }
 
-    // Return an existing invite only while it is unexpired, unused, AND minted
-    // for the current epoch — its signed additional data carries the epoch key
-    // the joiner bootstraps from, so a rotation must retire it.
+    // Reuse the newest live code unless the caller explicitly asked for a new
+    // one. Re-rendering the share sheet must not mint (it would churn a fresh
+    // code on every backend event); tapping "new code" must. Codes minted for
+    // earlier friends stay valid alongside it — each is separately single-use.
+    //
+    // An invite's signed additional data carries the epoch key the joiner
+    // bootstraps from, so entries minted under a rotated epoch are never reused.
     const currentEpoch = Number(membershipState?.currentEpoch) || 0
-    if (isInviteUsable(currentInvite, inviteUsesRemaining) && currentInvite.epochAtMint === currentEpoch) {
-        return z32.encode(currentInvite.invite)
+    if (!fresh) {
+        const existing = newestUsableInvite(inviteBook, currentEpoch)
+        if (existing) return z32.encode(existing.invite)
     }
 
     // The epoch key rides in the invite's signed additional data because the
@@ -404,53 +411,120 @@ export function createInvite() {
         return null
     }
     const inv = withInvitePolicy(BlindPairing.createInvite(autobase.key, { data: epochData }))
-    inv.epochAtMint = currentEpoch
-    setCurrentInvite(inv)
-    inviteUsesRemaining = INVITE_MAX_USES
+    const entry = addInvite(inviteBook, inv, { epochAtMint: currentEpoch })
     deleteLegacyInviteFile(legacyInviteFilePath)
+    logger.log('[INFO] Invite minted', describeInvites(inviteBook, currentEpoch))
 
-    return z32.encode(inv.invite)
+    return z32.encode(entry.invite)
 }
 
-function rotateInviteAndNotifyFrontend() {
-    setCurrentInvite(null)
-    inviteUsesRemaining = 0
+// Retire EVERY outstanding code and publish a fresh one.
+//
+// Used when something invalidates the whole book at once rather than one entry:
+// an epoch rotation (outstanding invites embed the retired epoch key in their
+// signed additional data) or a history-compaction barrier (they would send a
+// joiner into history the barrier just superseded). Note the compaction case
+// does not change the epoch, so relying on the per-entry epoch check would miss
+// it — these must be dropped explicitly.
+function retireAllInvitesAndNotify() {
+    clearInvites(inviteBook)
     deleteLegacyInviteFile(legacyInviteFilePath)
-
-    const newZ32 = createInvite()
-    sendInviteKeyToFrontend(newZ32 || '')
+    notifyInviteState({ mint: true })
 }
 
-function sendInviteKeyToFrontend(inviteKey) {
+// Re-publish the invite state after a use or a refusal. This no longer mints
+// unconditionally: the other live codes are still good, and minting on every
+// candidate would rotate the sharer's displayed code out from under them.
+function notifyInviteState({ mint = false } = {}) {
+    const nextZ32 = mint ? createInvite({ fresh: true }) : createInvite()
+    sendInviteKeyToFrontend(nextZ32 || '')
+}
+
+// The sharer has never been told that a code is single-use or that it expires in
+// ten minutes, so "it stopped working" reads as a bug. Send the facts alongside
+// the code.
+//
+// Shape change: this used to send the bare z32 string. Consumers must accept
+// both — an older UI paired with this backend still gets a usable code out of
+// the envelope only if it parses, so the raw-string fallback lives on the
+// reading side (see @listam/client).
+export function sendInviteKeyToFrontend(inviteKey) {
     if (!rpc) return
+    const currentEpoch = Number(membershipState?.currentEpoch) || 0
+    const summary = describeInvites(inviteBook, currentEpoch)
     const req = rpc.request(RPC_GET_KEY)
-    req.send(inviteKey)
+    req.send(JSON.stringify({
+        key: inviteKey,
+        expiresAt: summary.newestExpiresAt,
+        expiresInMs: summary.newestExpiresAt ? Math.max(0, summary.newestExpiresAt - Date.now()) : 0,
+        singleUse: true,
+        liveInvites: summary.live,
+        maxInvites: summary.max,
+    }))
+}
+
+// Refuse a candidate so the GUEST HEARS IT.
+//
+// This used to be `try { candidate.close() } catch (_) {}` at six separate
+// sites. `close()` does not exist on blind-pairing-core's MemberRequest — its
+// methods are confirm/deny/respond/open (blind-pairing-core/index.js:170-245) —
+// so every refusal threw TypeError into an empty catch and did nothing at all.
+// With no response written, the member never mutablePuts a reply
+// (blind-pairing/index.js:477-490) and the guest waits out its entire deadline.
+// Host refused / host unreachable / host never existed were indistinguishable,
+// which is why a two-minute spinner was the only diagnostic anyone ever got.
+//
+// `deny()` seals its reply with the invite's session and public key, both of
+// which are only populated by `open()` — so a candidate we cannot open is a
+// candidate we cannot answer. That is not a gap we can close: an unknown invite
+// id means we hold no key for it. Log it instead, and let the guest time out
+// knowing at least that the host never recognised the code.
+function refuseCandidate(candidate, { publicKey = null, status = DENY_STATUS.REJECTED, reason, context = {} }) {
+    if (status === null) {
+        logger.log('[WARNING] Pairing candidate refused with no reply possible', { reason, ...context })
+        return false
+    }
+    try {
+        if (publicKey) candidate.open(publicKey)
+        candidate.deny({ status })
+        logger.log('[WARNING] Pairing candidate denied', { reason, status, ...context })
+        return true
+    } catch (e) {
+        logger.log('[ERROR] Failed to deny pairing candidate', { reason, error: e?.message ?? String(e) })
+        return false
+    }
 }
 
 export function setupBlindPairing() {
     if (!autobase || !swarm) return
 
-    setPairing(new BlindPairing(swarm))
+    // Short poll: see PAIRING_POLL_MS. Without it the NAT-free DHT mailbox is
+    // read once per seven minutes and is unreachable inside a join.
+    setPairing(new BlindPairing(swarm, { poll: PAIRING_POLL_MS }))
 
     setPairingMember(pairing.addMember({
         discoveryKey: autobase.discoveryKey,
         onadd: async (candidate) => {
-            // Match invite
-            if (!currentInvite || !b4a.equals(currentInvite.id, candidate.inviteId)) {
-                try { candidate.close() } catch (_) {}
+            const reservedInvite = findInvite(inviteBook, candidate.inviteId)
+            if (!reservedInvite) {
+                refuseCandidate(candidate, {
+                    status: null,
+                    reason: 'unknown-invite',
+                    context: { liveInvites: inviteBook.entries.size },
+                })
                 return
             }
 
-            const reservation = reserveInviteUse(currentInvite, inviteUsesRemaining)
+            const reservation = reserveInvite(inviteBook, reservedInvite)
             if (!reservation.ok) {
-                try { candidate.close() } catch (_) {}
-                rotateInviteAndNotifyFrontend()
+                refuseCandidate(candidate, {
+                    publicKey: reservedInvite.publicKey,
+                    status: denyStatusForReason(reservation.reason),
+                    reason: reservation.reason,
+                })
+                notifyInviteState()
                 return
             }
-
-            const reservedInvite = currentInvite
-            inviteUsesRemaining = reservation.usesRemaining
-            setCurrentInvite(null)
 
             try {
                 // Open with invite's public key
@@ -494,9 +568,13 @@ export function setupBlindPairing() {
                 })
             } catch (e) {
                 logger.log('[ERROR] Failed to accept invite candidate:', e)
-                try { candidate.close() } catch (_) {}
+                // Already opened above, so the guest can be told. The entry is
+                // left in the book as a spent tombstone (the reservation above
+                // consumed it): deleting it would make the next holder of this
+                // same code unanswerable, which is the silence we are removing.
+                refuseCandidate(candidate, { status: DENY_STATUS.REJECTED, reason: 'accept-failed' })
             } finally {
-                rotateInviteAndNotifyFrontend()
+                notifyInviteState()
             }
         }
     }))
@@ -677,8 +755,7 @@ export async function initAutobase(newBaseKey, options = {}) {
         _epochResyncPromise = null
         _epochResyncRecord = null
         setMembershipState(createMembershipState())
-        setCurrentInvite(null)
-        inviteUsesRemaining = 0
+        clearInvites(inviteBook)
         // The checkpoints are keyed to one base's linearized view; a teardown
         // or base switch invalidates them.
         resetViewCheckpoint()
@@ -1137,6 +1214,25 @@ export async function performStorageRecovery(action) {
 }
 
 let _joinPromise = null
+// Set while a join is in flight so RPC_CANCEL_JOIN can abort it. Without this,
+// the single-flight guard below turned every retry into a lie: a user who
+// pasted a fresh code while an attempt was stuck silently re-attached to the
+// STUCK attempt, the new code was never even decoded, and when the old attempt
+// finally expired its failure was reported against the new code.
+let _joinAbort = null
+
+/**
+ * Abort an in-flight join. Idempotent and safe to call when nothing is running.
+ * @returns {boolean} whether there was anything to cancel
+ */
+export function cancelJoinViaInvite() {
+    if (!_joinAbort) return false
+    logger.log('[INFO] Join cancelled by request')
+    const abort = _joinAbort
+    _joinAbort = null
+    abort()
+    return true
+}
 
 export async function joinViaInvite(z32InviteStr) {
     if (_joinPromise) {
@@ -1188,14 +1284,60 @@ export async function joinViaInvite(z32InviteStr) {
             //    underlying Noise connection, which is the only live link to the
             //    host. The temp swarm stays alive so we can replicate over it.
             _tempSwarm = new Hyperswarm(swarmOptions())
-            _tempPairing = new BlindPairing(_tempSwarm)
+            // Short poll on the guest side too: the candidate reads the DHT
+            // reply mailbox before it announces (blind-pairing/index.js:651-668),
+            // so at the library default of seven minutes the very first read is
+            // the only one that ever happens inside our deadline — and it
+            // happens before the host could have answered.
+            _tempPairing = new BlindPairing(_tempSwarm, { poll: PAIRING_POLL_MS })
+
+            // A failed join used to leave three log lines and two minutes of
+            // silence. Record what the transport was actually doing, so the next
+            // field report is evidence instead of "it didn't work".
+            _tempSwarm.on('error', (err) => logger.log('[ERROR] Join temp swarm error', { error: err?.message ?? String(err) }))
+            _tempSwarm.on('connection', () => {
+                logger.log('[INFO] Join temp swarm connection', { connections: _tempSwarm?.connections?.size ?? 0 })
+            })
 
             const result = await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    reject(new Error('Pairing timed out'))
-                }, 120000)
+                const startedAt = Date.now()
+                let settled = false
 
-                _tempPairing.addCandidate({
+                const finish = (fn, arg) => {
+                    if (settled) return
+                    settled = true
+                    clearTimeout(timeout)
+                    clearInterval(heartbeat)
+                    _joinAbort = null
+                    fn(arg)
+                }
+
+                const timeout = setTimeout(() => {
+                    const net = joinTransportSnapshot()
+                    logger.log('[ERROR] Pairing deadline expired', net)
+                    const err = new Error('Pairing timed out')
+                    err.reason = refineTimeoutReason(JOIN_REASON.TIMEOUT, net)
+                    finish(reject, err)
+                }, JOIN_DEADLINE_MS)
+
+                // Every tick is one line and one UI update. It is what tells the
+                // difference between "never reached the DHT", "on the DHT but
+                // never found the host", and "found the host, got refused" —
+                // three failures that were previously one spinner.
+                const heartbeat = setInterval(() => {
+                    const net = joinTransportSnapshot()
+                    const elapsedMs = Date.now() - startedAt
+                    logger.log('[INFO] Join still pairing', { elapsedMs, ...net })
+                    broadcastMessage({ type: 'join-progress', phase: 'pairing', elapsedMs, ...net })
+                }, JOIN_HEARTBEAT_MS)
+
+                _joinAbort = () => {
+                    const err = new Error('Join cancelled')
+                    err.reason = JOIN_REASON.CANCELLED
+                    finish(reject, err)
+                }
+
+                const candidate = _tempPairing.addCandidate({
                     invite: z32.decode(normalizedInvite),
                     userData: Buffer.from(JSON.stringify({
                         version: 1,
@@ -1203,11 +1345,21 @@ export async function joinViaInvite(z32InviteStr) {
                         epochPublicKey: epochPublicKeyHex(joinEpochEncryptionKeyPair),
                     })),
                     onadd: async (paired) => {
-                        clearTimeout(timeout)
-                        resolve(paired)
+                        finish(resolve, paired)
                         // NOTE: do NOT call candidate.close() here — it kills
                         // the connection we need for replication bootstrapping.
                     }
+                })
+
+                // The host CAN now tell us why it said no (see refuseCandidate).
+                // Discarding this handle is what made the host-side fix
+                // invisible: blind-pairing-core emits 'rejected' on the request
+                // (blind-pairing-core/index.js:85) and nothing was listening.
+                candidate?.request?.on?.('rejected', (err) => {
+                    logger.log('[WARNING] Pairing refused by host', { code: err?.code ?? null })
+                    const refusal = new Error(err?.message || 'Pairing refused')
+                    refusal.reason = joinFailureReason(err)
+                    finish(reject, refusal)
                 })
             })
 
@@ -1316,10 +1468,16 @@ export async function joinViaInvite(z32InviteStr) {
                 waitForWritable()
             }
         } catch (e) {
-            logger.log('[ERROR] joinViaInvite failed:', e)
+            // Diagnostics ride as a separate argument, never hung off the
+            // Error: redactForLog reduces any Error to {name, message}
+            // (@listam/logging index.mjs:64), so context attached to it is
+            // silently dropped.
+            const reason = e?.reason || joinFailureReason(e)
+            logger.log('[ERROR] joinViaInvite failed:', e, { reason, ...joinTransportSnapshot() })
             setIsPendingJoinSuccess(false)
             broadcastMessage({
                 type: 'join-error',
+                reason,
                 message: e?.message || 'Failed to join peer'
             })
             try {
@@ -1381,7 +1539,7 @@ export async function removeMemberAndRotateEpoch(writerKey) {
         broadcastMembershipRoster()
         // The epoch rotated: any outstanding invite embeds the retired epoch
         // key in its signed additional data, so mint a fresh one.
-        rotateInviteAndNotifyFrontend()
+        retireAllInvitesAndNotify()
         // A rotation is exactly the moment history gets expensive for future
         // joiners: everything before it is now encrypted under a key an invite
         // will not carry. Flatten it if the mesh is ready — best-effort, and
@@ -1448,7 +1606,7 @@ export async function compactHistory({ trigger = 'manual', dryRun = false } = {}
     if (result.ok) {
         // Every outstanding invite predates the barrier, so its bootstrap data
         // would send a joiner into the history this just superseded.
-        rotateInviteAndNotifyFrontend()
+        retireAllInvitesAndNotify()
     }
     if (trigger === 'manual') {
         broadcastMessage({ type: 'compaction-result', ...result, readiness })
@@ -1659,8 +1817,88 @@ function broadcastMessage(payload) {
     }
 }
 
+// Relay keys resolved once at boot. Parsing per swarm would re-log the same
+// rejected entry on every join.
+export function configureRelays(value) {
+    const { keys, rejected } = setRelayKeys(value)
+    if (rejected.length) {
+        logger.log('[WARNING] Ignoring unparseable relay keys', { count: rejected.length })
+    }
+    logger.log('[INFO] Relay configuration', {
+        configured: keys.length,
+        fingerprints: relayFingerprints(keys),
+    })
+    return keys.length
+}
+
+// Every Hyperswarm in the backend must be built from this, including the
+// short-lived pairing swarm — a guest that relays its data connections but not
+// its pairing connection still cannot pair over mobile data.
 function swarmOptions() {
-    return swarmBootstrap ? { bootstrap: swarmBootstrap } : {}
+    return relaySwarmOptions(swarmBootstrap, {
+        onEngage: (info) => logger.log('[INFO] Relaying connections through a relay peer', info),
+    })
+}
+
+/**
+ * A snapshot of what the transport is actually doing, for logs, the join
+ * heartbeat and RPC_GET_NET_DIAGNOSTICS.
+ *
+ * `randomized` is the load-bearing field: true means this device's NAT assigns a
+ * fresh port per destination (every carrier network), which is the condition
+ * under which hyperdht refuses to holepunch at all unless a relay is configured.
+ */
+export function joinTransportSnapshot() {
+    const dht = _tempSwarm?.dht ?? swarm?.dht ?? null
+    return {
+        bootstrapped: dht?.bootstrapped ?? false,
+        online: dht?.online ?? false,
+        firewalled: dht?.firewalled ?? null,
+        randomized: dht?.randomized ?? null,
+        punches: dht?.stats?.punches ?? null,
+        relaying: dht?.stats?.relaying ?? null,
+        relayConfigured: getRelayKeys().length,
+        tempConnections: _tempSwarm?.connections?.size ?? 0,
+        mainConnections: swarm?.connections?.size ?? 0,
+    }
+}
+
+// --- Mobile lifecycle -------------------------------------------------------
+//
+// Bare Kit already suspends the worklet's event loop when the app backgrounds
+// (react-native-bare-kit/index.js:332 wires AppState to it at import time), but
+// nothing told the swarm. hyperswarm's suspend()/resume() (index.js:606,642)
+// exist for exactly this: resume() re-binds fresh UDP sockets through
+// dht-rpc's io.resume() (dht-rpc/lib/io.js:217) and re-announces. Without it a
+// host that left the app to send an invite code came back with dead sockets and
+// an expired announce, and simply stopped being reachable.
+
+export async function suspendNetwork() {
+    if (!swarm || swarm.suspended) return false
+    try {
+        await swarm.suspend()
+        logger.log('[INFO] Swarm suspended')
+        return true
+    } catch (e) {
+        logger.log('[ERROR] Swarm suspend failed', { error: e?.message ?? String(e) })
+        return false
+    }
+}
+
+export async function resumeNetwork() {
+    if (!swarm || !swarm.suspended) return false
+    try {
+        await swarm.resume()
+        logger.log('[INFO] Swarm resumed', joinTransportSnapshot())
+        // Re-announcing is what makes this device findable again; without a
+        // flush the topic can stay stale for a full refresh interval.
+        try { await discovery?.flushed?.() } catch { /* best effort */ }
+        broadcastNetworkStatus()
+        return true
+    } catch (e) {
+        logger.log('[ERROR] Swarm resume failed', { error: e?.message ?? String(e) })
+        return false
+    }
 }
 
 function normalizeInviteCode(raw) {

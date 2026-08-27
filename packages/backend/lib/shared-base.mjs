@@ -42,7 +42,10 @@ import {
     epochSecretKeyHex,
     generateEpochKey,
 } from './key-epochs.mjs'
-import { INVITE_MAX_USES, isInviteUsable, reserveInviteUse, withInvitePolicy } from './invite-policy.mjs'
+import { withInvitePolicy } from './invite-policy.mjs'
+import { addInvite, clearInvites, createInviteBook, describeInvites, findInvite, newestUsableInvite, reserveInvite } from './invite-book.mjs'
+import { relaySwarmOptions } from './relay.mjs'
+import { PAIRING_POLL_MS, JOIN_DEADLINE_MS, DENY_STATUS, JOIN_REASON, denyStatusForReason, joinFailureReason } from './pairing-tuning.mjs'
 
 const ENC_HEX = /^[0-9a-f]{64}$/
 
@@ -266,7 +269,7 @@ export async function openSharedBase (ctx, { baseKey = null, encryptionKey = nul
     await rebuildSharedListFromView(ctx)
 
     if (joinSwarm) {
-        ctx.swarm = new Hyperswarm(bootstrap ? { bootstrap } : {})
+        ctx.swarm = new Hyperswarm(relaySwarmOptions(bootstrap))
         ctx.swarm.on('error', (err) => logger.log('[ERROR] Shared-base swarm error:', err))
         ctx.swarm.on('connection', (conn) => {
             conn.on('error', () => {})
@@ -367,17 +370,23 @@ export async function bootstrapSharedOwner (ctx) {
 }
 
 // --- Invite (host) ------------------------------------------------------------
-export function createSharedInvite (ctx) {
+function sharedInviteBook (ctx) {
+    if (!ctx.inviteBook) ctx.inviteBook = createInviteBook()
+    return ctx.inviteBook
+}
+
+export function createSharedInvite (ctx, { fresh = false } = {}) {
     if (!ctx.autobase) return null
+    const book = sharedInviteBook(ctx)
     if (!canCreateMembershipInvite(ctx.membershipState, ctx.ownerAuthorityKeyPair)) {
-        ctx.currentInvite = null
-        ctx.inviteUsesRemaining = 0
+        clearInvites(book)
         logger.log('[WARNING] Shared invite rejected; only the owner device can create it')
         return null
     }
     const currentEpoch = Number(ctx.membershipState?.currentEpoch) || 0
-    if (isInviteUsable(ctx.currentInvite, ctx.inviteUsesRemaining) && ctx.currentInvite.epochAtMint === currentEpoch) {
-        return z32.encode(ctx.currentInvite.invite)
+    if (!fresh) {
+        const existing = newestUsableInvite(book, currentEpoch)
+        if (existing) return z32.encode(existing.invite)
     }
     const epochData = encodeInviteEpochData(ctx.epochKey, currentEpoch)
     if (!epochData) {
@@ -385,15 +394,17 @@ export function createSharedInvite (ctx) {
         return null
     }
     const inv = withInvitePolicy(BlindPairing.createInvite(ctx.autobase.key, { data: epochData }))
-    inv.epochAtMint = currentEpoch
-    ctx.currentInvite = inv
-    ctx.inviteUsesRemaining = INVITE_MAX_USES
-    return z32.encode(inv.invite)
+    const entry = addInvite(book, inv, { epochAtMint: currentEpoch })
+    return z32.encode(entry.invite)
 }
 
-function rotateSharedInvite (ctx) {
-    ctx.currentInvite = null
-    ctx.inviteUsesRemaining = 0
+/**
+ * Live-invite summary for the share UI, mirroring the project path so a list
+ * share can show the same expiry and single-use facts.
+ */
+export function describeSharedInvites (ctx) {
+    const currentEpoch = Number(ctx?.membershipState?.currentEpoch) || 0
+    return describeInvites(sharedInviteBook(ctx), currentEpoch)
 }
 
 // Re-pairing the SAME writer is idempotent only while its epoch public key also
@@ -411,23 +422,27 @@ export function sharedWriterMembershipRecordRequired (ctx, joiner) {
 // --- Host-side pairing listener (accepts joiners as writers) ------------------
 export function setupSharedPairing (ctx) {
     if (!ctx.autobase || !ctx.swarm) return
-    ctx.pairing = new BlindPairing(ctx.swarm)
+    ctx.pairing = new BlindPairing(ctx.swarm, { poll: PAIRING_POLL_MS })
+    const book = sharedInviteBook(ctx)
     ctx.pairingMember = ctx.pairing.addMember({
         discoveryKey: ctx.autobase.discoveryKey,
         onadd: async (candidate) => {
-            if (!ctx.currentInvite || !b4a.equals(ctx.currentInvite.id, candidate.inviteId)) {
-                try { candidate.close() } catch (_) {}
+            const reservedInvite = findInvite(book, candidate.inviteId)
+            if (!reservedInvite) {
+                // No key for this id, so no reply can be sealed. See
+                // refuseCandidate in network.mjs for why this is unavoidable.
+                logger.log('[WARNING] Shared pairing candidate refused with no reply possible', { reason: 'unknown-invite' })
                 return
             }
-            const reservation = reserveInviteUse(ctx.currentInvite, ctx.inviteUsesRemaining)
+            const reservation = reserveInvite(book, reservedInvite)
             if (!reservation.ok) {
-                try { candidate.close() } catch (_) {}
-                rotateSharedInvite(ctx)
+                denySharedCandidate(candidate, {
+                    publicKey: reservedInvite.publicKey,
+                    status: denyStatusForReason(reservation.reason),
+                    reason: reservation.reason,
+                })
                 return
             }
-            const reservedInvite = ctx.currentInvite
-            ctx.inviteUsesRemaining = reservation.usesRemaining
-            ctx.currentInvite = null
             try {
                 candidate.open(reservedInvite.publicKey)
                 if (!ctx.autobase.writable) throw new Error('Shared host is not writable')
@@ -459,12 +474,29 @@ export function setupSharedPairing (ctx) {
                 })
             } catch (e) {
                 logger.log('[ERROR] Failed to accept shared-base candidate:', e)
-                try { candidate.close() } catch (_) {}
-            } finally {
-                rotateSharedInvite(ctx)
+                denySharedCandidate(candidate, { status: DENY_STATUS.REJECTED, reason: 'accept-failed' })
             }
         },
     })
+}
+
+// Same contract as network.mjs's refuseCandidate: `close()` does not exist on a
+// MemberRequest, so the old refusal path was a TypeError swallowed by an empty
+// catch and the guest heard nothing at all.
+function denySharedCandidate (candidate, { publicKey = null, status = DENY_STATUS.REJECTED, reason }) {
+    if (status === null) {
+        logger.log('[WARNING] Shared pairing candidate refused with no reply possible', { reason })
+        return false
+    }
+    try {
+        if (publicKey) candidate.open(publicKey)
+        candidate.deny({ status })
+        logger.log('[WARNING] Shared pairing candidate denied', { reason, status })
+        return true
+    } catch (e) {
+        logger.log('[ERROR] Failed to deny shared pairing candidate', { reason, error: e?.message ?? String(e) })
+        return false
+    }
 }
 
 // The canonical identity of the list a shared base holds, read from the base's
@@ -515,7 +547,7 @@ let _sharedJoinTempSwarms = new Set()
 // Blind-pairing join of a shared base into a NEW ctx, WITHOUT replacing the
 // personal base (the additive counterpart of network.mjs joinViaInvite). Returns
 // { ctx, baseKeyHex } on success. The caller adds the personal-registry entry.
-export async function joinSharedBaseViaInvite (createBaseContext, { invite, storageDir, bootstrap = swarmBootstrap, joinSwarm = true, timeoutMs = 120000 } = {}) {
+export async function joinSharedBaseViaInvite (createBaseContext, { invite, storageDir, bootstrap = swarmBootstrap, joinSwarm = true, timeoutMs = JOIN_DEADLINE_MS, onPhase = null } = {}) {
     const normalizedInvite = normalizeInviteCode(invite)
     if (!normalizedInvite) throw new Error('Invite is empty or invalid')
     if (!storageDir) throw new Error('joinSharedBaseViaInvite requires a storageDir')
@@ -535,23 +567,51 @@ export async function joinSharedBaseViaInvite (createBaseContext, { invite, stor
     const joinEpochEncryptionKeyPair = createEpochEncryptionKeyPair()
     ctx.epochEncryptionKeyPair = joinEpochEncryptionKeyPair
 
-    const tempSwarm = new Hyperswarm(bootstrap ? { bootstrap } : {})
-    const tempPairing = new BlindPairing(tempSwarm)
+    const tempSwarm = new Hyperswarm(relaySwarmOptions(bootstrap))
+    const tempPairing = new BlindPairing(tempSwarm, { poll: PAIRING_POLL_MS })
     _sharedJoinTempSwarms.add(tempSwarm)
 
+    // A list join never reported a phase at all: broadcastJoinPhase lives in
+    // network.mjs and this path never called it, so the UI's joinPhase stayed
+    // null and the overlay coerced null to 'pairing'. A list join therefore
+    // displayed "Pairing..." for the whole of BOTH the pairing deadline and the
+    // writable wait that follows it.
+    const phase = (name) => { try { onPhase?.(name) } catch { /* never break a join to report progress */ } }
+
     try {
+        phase('pairing')
         const result = await new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error('Shared-base pairing timed out')), timeoutMs)
-            tempPairing.addCandidate({
+            let settled = false
+            const finish = (fn, arg) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                fn(arg)
+            }
+            const timer = setTimeout(() => {
+                const err = new Error('Shared-base pairing timed out')
+                err.reason = JOIN_REASON.TIMEOUT
+                finish(reject, err)
+            }, timeoutMs)
+            const candidate = tempPairing.addCandidate({
                 invite: z32.decode(normalizedInvite),
                 userData: Buffer.from(JSON.stringify({
                     version: 1,
                     writerKey: joinedWriter.writerKey.toString('hex'),
                     epochPublicKey: epochPublicKeyHex(joinEpochEncryptionKeyPair),
                 })),
-                onadd: async (paired) => { clearTimeout(timer); resolve(paired) },
+                onadd: async (paired) => finish(resolve, paired),
+            })
+            // The host can refuse with a reason now; without this listener that
+            // reason is thrown away and the guest waits out the deadline.
+            candidate?.request?.on?.('rejected', (err) => {
+                logger.log('[WARNING] Shared pairing refused by host', { code: err?.code ?? null })
+                const refusal = new Error(err?.message || 'Pairing refused')
+                refusal.reason = joinFailureReason(err)
+                finish(reject, refusal)
             })
         })
+        phase('permission')
 
         if (!result?.key || !result?.encryptionKey) throw new Error('Pairing returned incomplete credentials')
         const inviteEpoch = decodeInviteEpochData(result.data)

@@ -18,6 +18,10 @@ export function createNodePlatform(options = {}) {
         storageNamespace: options.storageNamespace,
         leaseTtlMs: options.leaseTtlMs,
         bootstrap: options.bootstrap,
+        // Relay public keys for peers that cannot hole punch (carrier NAT).
+        // Undefined means "use the built-in defaults"; an explicit empty array
+        // is a deliberate opt-out, so do not collapse the two.
+        relayKeys: options.relayKeys,
         sent,
         createRpc: options.createRpc ?? ((handler) => createNodeRpc(handler, sent, reply)),
         onTeardown(handler) {

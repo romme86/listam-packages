@@ -2,7 +2,17 @@ export type ClientEvent =
     | { type: 'add-from-backend'; item: unknown; raw: string }
     | { type: 'delete-from-backend'; item: unknown; raw: string }
     | { type: 'invalid-json'; command: number; raw: string | null; error: string }
-    | { type: 'invite-key'; key: string | null }
+    | {
+        type: 'invite-key'
+        key: string | null
+        /** Absolute ms deadline of the newest live code, or null when none. */
+        expiresAt: number | null
+        expiresInMs: number
+        singleUse: boolean
+        /** How many codes the owner currently has outstanding. */
+        liveInvites: number
+        maxInvites: number | null
+    }
     | { type: 'message'; payload: any; raw: string }
     | { type: 'message-empty' }
     | { type: 'persist-secret'; payload: string | null }

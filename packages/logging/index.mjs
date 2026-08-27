@@ -47,7 +47,23 @@ const SENSITIVE_KEYS = new Set([
     'scanData',
     'authorization',
     'authHeader',
-    'token'
+    'token',
+    // Credentials. These were absent while the log buffer only ever went to a
+    // terminal or journald; the field-diagnostics bundle (logTail) is meant to be
+    // copied off the device and pasted into a chat, so an unredacted `password`
+    // here is a credential in someone's message history.
+    'password',
+    'passwords',
+    'currentPassword',
+    'nextPassword',
+    'newPassword',
+    'passphrase',
+    'secret',
+    'secretKey',
+    'credential',
+    'credentials',
+    'seed',
+    'mnemonic'
 ].map((key) => key.toLowerCase()))
 
 const ITEM_KEYS = ['text', 'isDone', 'timeOfCompletion']
@@ -112,6 +128,71 @@ export function redactDiagnosticBundle(value) {
     return redactForLog(value)
 }
 
+export const DEFAULT_LOG_TAIL_CAPACITY = 500
+
+// A ceiling as well as a default: the ring lives on a phone, so a caller asking
+// for "everything" must still end up with a bounded buffer rather than a leak
+// that only shows up as an OOM days into a long-running headless peer.
+export const MAX_LOG_TAIL_CAPACITY = 10000
+
+// One process-wide ring, not one per logger: a field diagnostic bundle has to be
+// pullable with a single call, whichever logger instance happened to write the
+// line. It matters most on mobile, where the backend singleton's only sink is the
+// worklet's console — unreachable from the app, which is why the 2026-08-26
+// pairing failure produced no evidence anyone could send us.
+const tailState = {
+    capacity: DEFAULT_LOG_TAIL_CAPACITY,
+    lines: [],
+    cursor: 0,
+    dropped: 0
+}
+
+export function logTail(options = {}) {
+    const lines = readTailLines()
+    // A limit we cannot make sense of means "no limit": returning an empty bundle
+    // because the caller passed null would hide the very evidence it asked for.
+    const limit = clampCount(options.limit, lines.length)
+    // Keep the newest lines: whatever wedged the device is at the end of the run.
+    const entries = limit === null || limit >= lines.length
+        ? lines
+        : lines.slice(lines.length - limit)
+
+    // The buffered lines were redacted on the way in, but this bundle is meant to
+    // leave the device (screenshot, paste, support mail), so it pays a second pass.
+    return redactDiagnosticBundle({
+        entries,
+        buffered: lines.length,
+        dropped: tailState.dropped,
+        capacity: tailState.capacity
+    })
+}
+
+export function clearLogTail() {
+    tailState.lines = []
+    tailState.cursor = 0
+    tailState.dropped = 0
+    return tailStats()
+}
+
+export function configureLogTail(options = {}) {
+    if (options.capacity !== undefined) {
+        const capacity = clampCount(options.capacity, MAX_LOG_TAIL_CAPACITY)
+        // Refuse rather than coerce: a garbage capacity used to clamp to 0, which
+        // silently switched the field diagnostic off *and* threw away what was
+        // already buffered. Failing at the call site is the whole point here.
+        if (capacity === null) throw new TypeError('configureLogTail: capacity must be a finite number')
+        const kept = readTailLines()
+        const evicted = Math.max(0, kept.length - capacity)
+
+        tailState.capacity = capacity
+        tailState.lines = evicted ? kept.slice(evicted) : kept
+        tailState.cursor = capacity ? tailState.lines.length % capacity : 0
+        // Shrinking drops the oldest lines for real, so the bundle must own up to it.
+        tailState.dropped += evicted
+    }
+    return tailStats()
+}
+
 export function parseLogArgs(args, options = {}) {
     let level = 'info'
     let message = ''
@@ -142,9 +223,14 @@ export function formatLogLine(args, options = {}) {
 
 export function createLogger(options = {}) {
     const write = options.write || ((line) => console.error(line))
+    const keepTail = options.tail !== false
     return {
         log(...args) {
-            write(formatLogLine(args, options))
+            const line = formatLogLine(args, options)
+            // Buffer before writing: a sink that throws is exactly the failure a
+            // tail is there to explain.
+            if (keepTail) pushTailLine(line)
+            write(line)
         },
         info(message, ...details) {
             this.log(`[INFO] ${message}`, ...details)
@@ -159,6 +245,49 @@ export function createLogger(options = {}) {
 }
 
 export const logger = createLogger({ app: 'backend' })
+
+function pushTailLine(line) {
+    if (tailState.capacity <= 0) {
+        tailState.dropped += 1
+        return
+    }
+
+    if (tailState.lines.length < tailState.capacity) {
+        tailState.lines.push(line)
+        tailState.cursor = tailState.lines.length % tailState.capacity
+        return
+    }
+
+    // Full ring: the cursor slot holds the oldest line, so this write is exactly
+    // one eviction.
+    tailState.lines[tailState.cursor] = line
+    tailState.cursor = (tailState.cursor + 1) % tailState.capacity
+    tailState.dropped += 1
+}
+
+function readTailLines() {
+    if (tailState.lines.length < tailState.capacity) return tailState.lines.slice()
+    return tailState.lines.slice(tailState.cursor).concat(tailState.lines.slice(0, tailState.cursor))
+}
+
+function tailStats() {
+    return {
+        buffered: tailState.lines.length,
+        dropped: tailState.dropped,
+        capacity: tailState.capacity
+    }
+}
+
+// Returns null for anything that is not a real number, so each caller decides what
+// to do about it. No coercion: Number(null) and Number('') are both 0, and a 0 here
+// means "buffer nothing" — the one outcome a bad argument must never produce
+// silently. Infinity clamps to `max` rather than falling through to 0.
+function clampCount(value, max) {
+    if (typeof value !== 'number' || Number.isNaN(value)) return null
+    const count = Math.floor(value)
+    if (count < 0) return 0
+    return Math.min(count, max)
+}
 
 function isBytes(value) {
     return typeof value?.byteLength === 'number' &&

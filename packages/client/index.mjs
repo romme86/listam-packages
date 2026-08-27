@@ -71,16 +71,53 @@ export function decodeBackendRequest(requestOrCommand, data) {
         case RPC_ADD_FROM_BACKEND:
             return decodeJsonField(command, requestData, CLIENT_EVENT_TYPES.ADD_FROM_BACKEND, 'item')
         case RPC_GET_KEY:
-            return {
-                type: CLIENT_EVENT_TYPES.INVITE_KEY,
-                key: dataToString(requestData),
-            }
+            return decodeInviteKey(requestData)
         default:
             return {
                 type: CLIENT_EVENT_TYPES.UNKNOWN,
                 command,
                 data: dataToString(requestData),
             }
+    }
+}
+
+// Invites gained an envelope carrying the facts the sharer was never told:
+// that a code is single-use and that it dies in ten minutes. Both were invisible,
+// so "the code stopped working" read as a bug instead of an expiry.
+//
+// The bare-string shape is still accepted. A UI on this version talking to an
+// older backend gets a raw z32 code, and must still work — this is the only
+// place that skew is absorbed.
+function decodeInviteKey(requestData) {
+    const raw = dataToString(requestData)
+    const event = {
+        type: CLIENT_EVENT_TYPES.INVITE_KEY,
+        key: raw,
+        expiresAt: null,
+        expiresInMs: 0,
+        singleUse: true,
+        liveInvites: raw ? 1 : 0,
+        maxInvites: null,
+    }
+    if (!raw || raw[0] !== '{') return event
+
+    try {
+        const parsed = JSON.parse(raw)
+        if (!parsed || typeof parsed !== 'object' || typeof parsed.key !== 'string') return event
+        return {
+            ...event,
+            key: parsed.key,
+            expiresAt: Number.isFinite(parsed.expiresAt) ? parsed.expiresAt : null,
+            expiresInMs: Number.isFinite(parsed.expiresInMs) ? parsed.expiresInMs : 0,
+            singleUse: parsed.singleUse !== false,
+            liveInvites: Number.isFinite(parsed.liveInvites) ? parsed.liveInvites : (parsed.key ? 1 : 0),
+            maxInvites: Number.isFinite(parsed.maxInvites) ? parsed.maxInvites : null,
+        }
+    } catch {
+        // A z32 code never starts with '{', so this is a malformed envelope
+        // rather than a legacy code. Surfacing the raw string would put junk in
+        // a QR; an empty key lets the UI say "no code" instead.
+        return { ...event, key: '', liveInvites: 0 }
     }
 }
 

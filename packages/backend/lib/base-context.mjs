@@ -79,8 +79,8 @@ export function createBaseContext ({ role = 'shared', baseId = null, baseKey = n
         // Blind pairing (per base)
         pairing: null,
         pairingMember: null,
-        currentInvite: null,
-        inviteUsesRemaining: 0,
+        // Live invite codes for this shared base; see lib/invite-book.mjs.
+        inviteBook: null,
 
         // In-memory data (per base)
         // Canonical list bucket held by this single-list shared base. Learned

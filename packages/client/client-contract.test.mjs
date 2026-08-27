@@ -47,9 +47,59 @@ for (const adapter of adapters) {
         await t.test('decodes invite and secret persistence events', () => {
             const secretPayload = { op: 'persist', name: 'autobaseKey', value: '00' }
 
+            // A bare z32 code is what an OLDER backend sends. A UI on this
+            // version must still work against one, so the legacy shape stays
+            // supported and is filled in with safe defaults.
             assert.deepEqual(decodeWithClientAdapter(adapter, RPC_GET_KEY, 'invite-z32'), {
                 type: 'invite-key',
                 key: 'invite-z32',
+                expiresAt: null,
+                expiresInMs: 0,
+                singleUse: true,
+                liveInvites: 1,
+                maxInvites: null,
+            })
+
+            // The current backend sends an envelope, because the sharer was
+            // never told a code is single-use or that it dies in ten minutes.
+            assert.deepEqual(decodeWithClientAdapter(adapter, RPC_GET_KEY, JSON.stringify({
+                key: 'invite-z32',
+                expiresAt: 1234,
+                expiresInMs: 5678,
+                singleUse: true,
+                liveInvites: 3,
+                maxInvites: 8,
+            })), {
+                type: 'invite-key',
+                key: 'invite-z32',
+                expiresAt: 1234,
+                expiresInMs: 5678,
+                singleUse: true,
+                liveInvites: 3,
+                maxInvites: 8,
+            })
+
+            // A malformed envelope must not put junk into a QR code. z32 never
+            // starts with '{', so this is corruption, not a legacy code.
+            assert.deepEqual(decodeWithClientAdapter(adapter, RPC_GET_KEY, '{not json'), {
+                type: 'invite-key',
+                key: '',
+                expiresAt: null,
+                expiresInMs: 0,
+                singleUse: true,
+                liveInvites: 0,
+                maxInvites: null,
+            })
+
+            // No invite at all (owner cannot mint) stays an empty key.
+            assert.deepEqual(decodeWithClientAdapter(adapter, RPC_GET_KEY, ''), {
+                type: 'invite-key',
+                key: '',
+                expiresAt: null,
+                expiresInMs: 0,
+                singleUse: true,
+                liveInvites: 0,
+                maxInvites: null,
             })
             assert.deepEqual(decodeWithClientAdapter(adapter, RPC_PERSIST_SECRET, secretPayload), {
                 type: 'persist-secret',

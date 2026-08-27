@@ -31,7 +31,12 @@ import {
     RPC_SET_BACKUP_SCHEDULE,
     RPC_COMPACT_HISTORY,
     RPC_SHARE_LIST,
-    RPC_JOIN_LIST
+    RPC_JOIN_LIST,
+    RPC_CANCEL_JOIN,
+    RPC_NET_SUSPEND,
+    RPC_NET_RESUME,
+    RPC_GET_LOG_TAIL,
+    RPC_GET_NET_DIAGNOSTICS
 } from '@listam/protocol'
 import b4a from 'b4a'
 import {syncListToFrontend, validateItem, addItem, updateItem, deleteItem, moveItem, rebuildListFromPersistedOps, rebuildExtraListItems, rebuildAllItems, projectItemsToFrontend, clearWriteChain, setMutationHook, setOutbox, replayQueuedOperation} from './lib/item.mjs'
@@ -42,7 +47,7 @@ import {
     normalizeListOperation,
 } from './lib/list-reducer.mjs'
 import {loadAutobaseKey, saveAutobaseKey, loadEncryptionKey, saveEncryptionKey, loadOwnerAuthorityKey, saveOwnerAuthorityKey, deleteLegacyKeyFile, deleteLegacyInviteFile, loadEpochKey, saveEpochKey, deleteEpochKey, loadEpochEncryptionKey, saveEpochEncryptionKey} from "./lib/key.mjs"
-import {initAutobase, joinViaInvite, createInvite, removeMemberAndRotateEpoch, resyncAuthorizedEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery, compactHistory, broadcastCompactionReadiness} from "./lib/network.mjs"
+import {initAutobase, joinViaInvite, cancelJoinViaInvite, createInvite, removeMemberAndRotateEpoch, resyncAuthorizedEpoch, broadcastMembershipRoster, broadcastBaseState, sendOwnerRecoveryCodeToFrontend, recoverOwnerAuthority, performStorageRecovery, compactHistory, broadcastCompactionReadiness, sendInviteKeyToFrontend, configureRelays, suspendNetwork, resumeNetwork, joinTransportSnapshot} from "./lib/network.mjs"
 import { normalizeRecoveryPolicy } from './lib/recovery.mjs'
 import { createStorageLease } from './lib/storage-lease.mjs'
 import { fence, clearFence } from './lib/fence.mjs'
@@ -101,7 +106,8 @@ import {
     setEpochKey,
     setEpochEncryptionKeyPair
 } from "./lib/state.mjs"
-import { logger } from './lib/logger.mjs'
+import { logger, logTail } from './lib/logger.mjs'
+import { DEFAULT_RELAY_KEYS } from './lib/relay.mjs'
 import { setBackendFs, getBackendFs } from './lib/platform-fs.mjs'
 
 export let storagePath = './data'
@@ -218,6 +224,10 @@ export async function startBackend(platform) {
     swarmBootstrap = Array.isArray(platform.bootstrap) && platform.bootstrap.length > 0
         ? platform.bootstrap
         : null
+    // Relays let a peer on carrier NAT connect at all; see lib/relay.mjs. The
+    // platform adapter supplies them so a desktop/headless operator can point at
+    // their own relay, and DEFAULT_RELAY_KEYS covers everyone else.
+    configureRelays(platform.relayKeys ?? DEFAULT_RELAY_KEYS)
     platformFs = platform.fs
     setBackendFs(platformFs)
     setPresenceWritesEnabled(platform.presenceWrites !== false)
@@ -476,9 +486,9 @@ async function handleFrontendRequest(req, error) {
                     logger.log('[WARNING] RPC_GET_KEY requested before Autobase is ready')
                     break
                 }
-                const z32Invite = createInvite()
-                const keyReq = rpc.request(RPC_GET_KEY)
-                keyReq.send(z32Invite || '')
+                // Not `fresh`: re-opening the share sheet must show the code
+                // the user already handed out, not churn a new one per render.
+                sendInviteKeyToFrontend(createInvite() || '')
                 break
             }
             case RPC_JOIN_KEY: {
@@ -490,11 +500,49 @@ async function handleFrontendRequest(req, error) {
             }
             case RPC_CREATE_INVITE: {
                 logger.log('[INFO] Command RPC_CREATE_INVITE')
-                const z32Invite = createInvite()
-                if (rpc) {
-                    const keyReq = rpc.request(RPC_GET_KEY)
-                    keyReq.send(z32Invite || '')
-                }
+                // An explicit "new code" action. Previous codes stay live and
+                // separately single-use, so the owner can hand a different one
+                // to each person instead of the second mint killing the first.
+                sendInviteKeyToFrontend(createInvite({ fresh: true }) || '')
+                break
+            }
+            case RPC_CANCEL_JOIN: {
+                logger.log('[INFO] Command RPC_CANCEL_JOIN')
+                const cancelled = cancelJoinViaInvite()
+                replyJson(req, { ok: true, cancelled })
+                break
+            }
+            case RPC_NET_SUSPEND: {
+                logger.log('[INFO] Command RPC_NET_SUSPEND')
+                const suspended = await suspendNetwork()
+                replyJson(req, { ok: true, suspended })
+                break
+            }
+            case RPC_NET_RESUME: {
+                logger.log('[INFO] Command RPC_NET_RESUME')
+                const resumed = await resumeNetwork()
+                replyJson(req, { ok: true, resumed })
+                break
+            }
+            case RPC_GET_NET_DIAGNOSTICS: {
+                logger.log('[INFO] Command RPC_GET_NET_DIAGNOSTICS')
+                replyJson(req, { ok: true, ...joinTransportSnapshot() })
+                break
+            }
+            case RPC_GET_LOG_TAIL: {
+                logger.log('[INFO] Command RPC_GET_LOG_TAIL')
+                const data = parseRpcJson(req.data) || {}
+                // logTail names the array `entries`; the RPC contract the UIs
+                // consume calls it `lines`. Map here rather than renaming a
+                // published logging export out from under other callers.
+                const tail = logTail({ limit: data.limit })
+                replyJson(req, {
+                    ok: true,
+                    lines: tail.entries,
+                    dropped: tail.dropped,
+                    buffered: tail.buffered,
+                    capacity: tail.capacity,
+                })
                 break
             }
             case RPC_REMOVE_MEMBER: {
@@ -704,6 +752,14 @@ function parseRpcJson(data) {
         return null
     }
 }
+
+// Reply where the transport supports it. Mobile's bare-rpc exposes reply but the
+// app does not read it for these, so every caller must also tolerate silence.
+function replyJson(req, payload) {
+    if (typeof req?.reply !== 'function') return
+    try { req.reply(JSON.stringify(payload)) } catch (e) { logger.log('[ERROR] rpc reply:', e) }
+}
+
 
 // Answer the requester with the mutation outcome where the transport supports
 // replies (the in-process desktop/headless channel and the node test rpc do;
@@ -1882,6 +1938,10 @@ async function joinList (invite) {
             invite,
             storageDir: sharedStorageDir(dirName),
             bootstrap: swarmBootstrap,
+            // A list join used to report no phase at all, so the overlay showed
+            // "Pairing..." for the whole of both the pairing deadline and the
+            // writable wait after it — up to four minutes on one label.
+            onPhase: (phase) => notifyFrontend({ type: 'join-phase', phase }),
         })
         ctx = joined.ctx
         baseKeyHex = joined.baseKeyHex
