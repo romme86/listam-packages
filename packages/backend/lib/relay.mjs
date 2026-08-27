@@ -35,7 +35,12 @@ import b4a from 'b4a'
 // forwards bytes — so this is a reachability aid, not a trust boundary. It is
 // still a liveness dependency, which is why the list is plural: `selectRelay`
 // picks one at random per connection (hyperdht/lib/connect.js:876).
-export const DEFAULT_RELAY_KEYS = []
+export const DEFAULT_RELAY_KEYS = [
+    // Geekom (cassandrina-app), deployed 2026-08-27. Derived from a seed
+    // persisted at ~/listam-relay, so it survives restarts and reinstalls —
+    // rotating it would strand every client already shipping this constant.
+    '8kn1epgsuok4zbkq3odaz7xf67yrs81bt7g1ztnr5fdq6aahfj1o',
+]
 
 const RELAY_KEY_BYTES = 32
 
