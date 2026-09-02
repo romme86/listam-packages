@@ -82,6 +82,23 @@ test('translations render with interpolation, plural forms, and fallback catalog
     assert.equal(createI18n({ localeChoice: 'ja' }).t('main.empty.title'), 'Your list is empty')
 })
 
+// A notes row prints its block count on every locale, and a one-block note is
+// the common case (a note is plain until its first block), so the singular is
+// the form users see most. It shipped as a bare '{count} blocks' string and
+// rendered "1 blocks" in the UI — every locale carries plural forms now.
+test('the notes block count pluralizes in every locale', () => {
+    const singulars = { en: '1 block', es: '1 bloque', de: '1 Block', fr: '1 bloc', it: '1 blocco', pt: '1 bloco' }
+    for (const [localeChoice, singular] of Object.entries(singulars)) {
+        const i18n = createI18n({ localeChoice })
+        assert.equal(i18n.t('desktop.notes.blockCount', { count: 1 }), singular)
+        assert.notEqual(
+            i18n.t('desktop.notes.blockCount', { count: 3 }),
+            i18n.t('desktop.notes.blockCount', { count: 1 }),
+            `${localeChoice} must distinguish one block from many`,
+        )
+    }
+})
+
 test('Intl helpers format numbers and dates without leaking message syntax', () => {
     const i18n = createI18n({ localeChoice: 'en' })
     assert.equal(i18n.number(1234).includes('1'), true)

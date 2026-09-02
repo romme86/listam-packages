@@ -129,7 +129,7 @@ export function deltaPercent (actualHours: number, estimatedHours: number): numb
 
 // --- Block-based ticket body -------------------------------------------------
 
-export type BlockKind = 'markdown' | 'checklist' | 'numberedList' | 'links' | 'image' | 'table' | 'callout' | 'code'
+export type BlockKind = 'heading' | 'divider' | 'markdown' | 'checklist' | 'numberedList' | 'links' | 'image' | 'table' | 'callout' | 'code'
 export interface BlockTypeSpec { type: BlockKind; icon: string; labelKey: string }
 export interface TicketBlock { id: string; type: string; [key: string]: unknown }
 
