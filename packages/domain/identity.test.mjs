@@ -49,6 +49,7 @@ test('isNotesType is true only for the exact notes type', () => {
     assert.equal(isNotesType('todo'), false)
     assert.equal(isNotesType('shopping'), false)
     assert.equal(isNotesType('kanban'), false)
+    assert.equal(isNotesType('board'), false)
     assert.equal(isNotesType(''), false)
     assert.equal(isNotesType(undefined), false)
     assert.equal(isNotesType(null), false)
