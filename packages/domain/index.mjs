@@ -12,3 +12,7 @@ export * from './value.mjs'
 export * from './meta.mjs'
 export * from './authoritative-base.mjs'
 export * from './peer-display.mjs'
+
+// The ESP32 leaf experiment is paused. Keep stored preferences and protocol
+// code recoverable, but never expose or auto-start its app integrations.
+export const LEAF_EXPERIMENT_ENABLED = false

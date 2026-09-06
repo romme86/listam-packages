@@ -25,6 +25,8 @@ const REQUEST_TIMEOUT_MS = 30_000
 // test bind the client to a private testnet; production uses the default.
 export function createOwnerControlClient(deps) {
     const dht = typeof deps.createDht === 'function' ? deps.createDht() : new DHT()
+    deps.registerNetwork?.(dht)
+    const timeoutMs = deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
     let deviceKeyPair = null
     let servers = []
 
@@ -48,24 +50,27 @@ export function createOwnerControlClient(deps) {
         const keyPair = await ensureDeviceKeyPair()
         const socket = dht.connect(b4a.from(serverPublicKeyHex, 'hex'))
         socket.on('error', () => {})
-        await new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error('control connection timed out')), REQUEST_TIMEOUT_MS)
-            socket.once('open', () => { clearTimeout(timer); resolve() })
-            socket.once('close', () => { clearTimeout(timer); reject(new Error('control connection closed')) })
-        })
-        const session = createOwnerControlSession({ keyPair, write: (line) => socket.write(line + '\n') })
-        let buffered = ''
-        socket.on('data', (chunk) => {
-            buffered += b4a.toString(chunk)
-            let newline = buffered.indexOf('\n')
-            while (newline >= 0) {
-                session.handleLine(buffered.slice(0, newline))
-                buffered = buffered.slice(newline + 1)
-                newline = buffered.indexOf('\n')
-            }
-        })
         try {
-            return await withTimeout(run(session), REQUEST_TIMEOUT_MS)
+            await new Promise((resolve, reject) => {
+                const cleanup = () => { clearTimeout(timer); socket.removeListener('open', opened); socket.removeListener('close', closed) }
+                const opened = () => { cleanup(); resolve() }
+                const closed = () => { cleanup(); reject(new Error('control connection closed')) }
+                const timer = setTimeout(() => { cleanup(); reject(new Error('control connection timed out')) }, timeoutMs)
+                socket.once('open', opened)
+                socket.once('close', closed)
+            })
+            const session = createOwnerControlSession({ keyPair, write: (line) => socket.write(line + '\n') })
+            let buffered = ''
+            socket.on('data', (chunk) => {
+                buffered += b4a.toString(chunk)
+                let newline = buffered.indexOf('\n')
+                while (newline >= 0) {
+                    session.handleLine(buffered.slice(0, newline))
+                    buffered = buffered.slice(newline + 1)
+                    newline = buffered.indexOf('\n')
+                }
+            })
+            return await withTimeout(run(session), timeoutMs)
         } finally {
             socket.destroy()
         }

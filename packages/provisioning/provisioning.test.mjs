@@ -192,3 +192,54 @@ test('provisionLeaf times out without a response', async () => {
 test('provisionLeaf validates the transport contract', async () => {
     await assert.rejects(provisionLeaf({ transport: {}, payload: fullPayload() }), /transport/)
 })
+
+for (const stage of ['subscribe', 'write', 'unsubscribe']) {
+    test(`provisionLeaf bounds a stalled ${stage} with one deadline`, { timeout: 1000 }, async () => {
+        let writes = 0
+        const transport = {
+            subscribe: async () => stage === 'subscribe' ? new Promise(() => {}) : () => new Promise(() => {}),
+            write: async () => { writes++; if (stage === 'write') await new Promise(() => {}) },
+        }
+        await assert.rejects(provisionLeaf({ transport, payload: fullPayload(), timeoutMs: 20 }), /timed out/)
+        if (stage === 'subscribe') assert.equal(writes, 0)
+        if (stage === 'write') assert.equal(writes, 1)
+    })
+}
+
+test('late subscribe completion cleans up without sending credentials after cancellation', async () => {
+    const controller = new AbortController()
+    let connected
+    let cleaned = 0
+    let writes = 0
+    const transport = {
+        subscribe: () => new Promise((resolve) => { connected = resolve }),
+        write: async () => { writes++ },
+    }
+    const result = provisionLeaf({ transport, payload: fullPayload(), signal: controller.signal })
+    const rejected = assert.rejects(result, /cancelled/)
+    await Promise.resolve()
+    controller.abort()
+    await rejected
+    connected(() => { cleaned++ })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(cleaned, 1)
+    assert.equal(writes, 0)
+})
+
+test('terminal refusal stops sending further frames even if the write is still pending', async () => {
+    let handler
+    let completeWrite
+    let writes = 0
+    const transport = {
+        subscribe: async (_, onValue) => { handler = onValue },
+        write: () => {
+            writes++
+            handler(Uint8Array.of(STATUS.ERR_VALIDATE))
+            return new Promise((resolve) => { completeWrite = resolve })
+        },
+    }
+    await assert.rejects(provisionLeaf({ transport, payload: fullPayload() }), /ERR_VALIDATE/)
+    completeWrite()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(writes, 1)
+})

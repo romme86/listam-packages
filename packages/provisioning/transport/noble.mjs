@@ -43,59 +43,49 @@ async function loadNoble() {
     }
 }
 
-function waitForPoweredOn(noble, timeoutMs) {
+function waitForPoweredOn(noble, signal) {
     if (noble.state === 'poweredOn') return Promise.resolve()
     return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
+        const cleanup = () => {
             noble.removeListener('stateChange', onState)
-            reject(new Error(`BLE adapter not ready (state: ${noble.state})`))
-        }, timeoutMs)
+            signal.removeEventListener('abort', onAbort)
+        }
+        const onAbort = () => { cleanup(); reject(new Error('BLE adapter not ready')) }
         const onState = (state) => {
-            if (state === 'poweredOn') {
-                clearTimeout(timer)
-                noble.removeListener('stateChange', onState)
-                resolve()
-            }
+            if (state === 'poweredOn') { cleanup(); resolve() }
         }
         noble.on('stateChange', onState)
+        signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) onAbort()
     })
 }
 
-function scanForLeaf(noble, { serviceUuid, namePrefix, timeoutMs }) {
+function scanForLeaf(noble, { serviceUuid, namePrefix, signal }) {
     return new Promise((resolve, reject) => {
         const wanted = bare(serviceUuid)
-        const timer = setTimeout(async () => {
+        let settled = false
+        const finish = (error, peripheral) => {
+            if (settled) return
+            settled = true
             noble.removeListener('discover', onDiscover)
-            try {
-                await noble.stopScanningAsync()
-            } catch {
-                /* ignore */
-            }
-            reject(new Error('no listam leaf found in provisioning mode'))
-        }, timeoutMs)
-
-        const onDiscover = async (peripheral) => {
+            signal.removeEventListener('abort', onAbort)
+            Promise.resolve().then(() => noble.stopScanningAsync()).catch(() => {})
+            if (error) reject(error)
+            else resolve(peripheral)
+        }
+        const onAbort = () => finish(new Error('no listam leaf found in provisioning mode'))
+        const onDiscover = (peripheral) => {
             const adv = peripheral.advertisement || {}
             const services = (adv.serviceUuids || []).map((u) => u.toLowerCase())
-            const name = adv.localName || ''
-            const matches = services.includes(wanted) || name.startsWith(namePrefix)
-            if (!matches) return
-            clearTimeout(timer)
-            noble.removeListener('discover', onDiscover)
-            try {
-                await noble.stopScanningAsync()
-            } catch {
-                /* ignore */
-            }
-            resolve(peripheral)
+            if (services.includes(wanted) || (adv.localName || '').startsWith(namePrefix)) finish(null, peripheral)
         }
-
         noble.on('discover', onDiscover)
-        noble.startScanningAsync([wanted], false).catch((err) => {
-            // Some platforms reject service-filtered scans; retry unfiltered.
-            noble.startScanningAsync([], false).catch(reject)
-            void err
-        })
+        signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) { onAbort(); return }
+        noble.startScanningAsync([wanted], false).catch(() => {
+            // A rejection after timeout must not restart discovery.
+            if (!settled) return noble.startScanningAsync([], false)
+        }).catch((error) => finish(error))
     })
 }
 
@@ -106,72 +96,107 @@ export async function openLeafTransport({
     namePrefix = ADVERTISED_NAME_PREFIX,
     timeoutMs = 20000,
     logger = console,
+    noble: adapter,
 } = {}) {
-    const noble = await loadNoble()
-    await waitForPoweredOn(noble, timeoutMs)
-
-    logger?.log?.('[provision] scanning for a leaf in provisioning mode…')
-    const peripheral = await scanForLeaf(noble, { serviceUuid, namePrefix, timeoutMs })
-    const id = peripheral.id
-    const name = peripheral.advertisement?.localName || `${namePrefix}-?`
-    logger?.log?.(`[provision] connecting to ${name} (${id})…`)
-
-    await peripheral.connectAsync()
-    if (typeof peripheral.requestMtuAsync === 'function') {
-        try {
-            await peripheral.requestMtuAsync(247)
-        } catch {
-            /* keep negotiated/default MTU */
-        }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('timeoutMs must be positive')
+    const noble = adapter ?? await loadNoble()
+    const controller = new AbortController()
+    let peripheral
+    let active = true
+    const subscriptions = new Set()
+    const release = () => {
+        active = false
+        for (const off of subscriptions) off()
+        Promise.resolve().then(() => noble.stopScanningAsync()).catch(() => {})
+        if (peripheral) Promise.resolve().then(() => peripheral.disconnectAsync()).catch(() => {})
     }
+    let timer
+    const expired = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            release()
+            reject(new Error('BLE connection timed out'))
+            controller.abort()
+        }, timeoutMs)
+    })
+    const step = (operation) => Promise.race([operation, expired])
+    try {
+        await step(waitForPoweredOn(noble, controller.signal))
 
-    const { characteristics } = await peripheral.discoverSomeServicesAndCharacteristicsAsync(
-        [bare(serviceUuid)],
-        [bare(CHAR_CONFIG_UUID), bare(CHAR_STATUS_UUID)],
-    )
-    const configChar = characteristics.find((c) => c.uuid === bare(CHAR_CONFIG_UUID))
-    const statusChar = characteristics.find((c) => c.uuid === bare(CHAR_STATUS_UUID))
-    if (!configChar || !statusChar) {
-        await peripheral.disconnectAsync().catch(() => {})
-        throw new Error('leaf is missing the expected provisioning characteristics')
-    }
+        logger?.log?.('[provision] scanning for a leaf in provisioning mode…')
+        peripheral = await step(scanForLeaf(noble, { serviceUuid, namePrefix, signal: controller.signal }))
+        const id = peripheral.id
+        const name = peripheral.advertisement?.localName || `${namePrefix}-?`
+        logger?.log?.(`[provision] connecting to ${name} (${id})…`)
 
-    const attMtu = typeof peripheral.mtu === 'number' ? peripheral.mtu : 23
-    const mtu = Math.max(DEFAULT_MTU, attMtu - 3)
-
-    return {
-        id,
-        name,
-        mtu,
-        async write(charUuid, bytes) {
-            if (bare(charUuid) !== bare(CHAR_CONFIG_UUID)) {
-                throw new Error(`unexpected write target ${charUuid}`)
-            }
-            // write-with-response (withoutResponse=false) for ordered, reliable delivery.
-            await configChar.writeAsync(Buffer.from(bytes), false)
-        },
-        async subscribe(charUuid, onValue) {
-            if (bare(charUuid) !== bare(CHAR_STATUS_UUID)) {
-                throw new Error(`unexpected subscribe target ${charUuid}`)
-            }
-            const listener = (data) => onValue(new Uint8Array(data))
-            statusChar.on('data', listener)
-            await statusChar.subscribeAsync()
-            return async () => {
-                statusChar.removeListener('data', listener)
-                try {
-                    await statusChar.unsubscribeAsync()
-                } catch {
-                    /* link may be gone after the leaf reboots */
-                }
-            }
-        },
-        async close() {
+        await step(peripheral.connectAsync().then(() => {
+            if (!active) return peripheral.disconnectAsync().catch(() => {})
+        }))
+        if (typeof peripheral.requestMtuAsync === 'function') {
             try {
-                await peripheral.disconnectAsync()
+                await step(peripheral.requestMtuAsync(247))
             } catch {
-                /* already disconnected (e.g. leaf rebooted on success) */
+                if (!active) throw new Error('BLE connection timed out')
+                /* keep negotiated/default MTU */
             }
-        },
+        }
+
+        const { characteristics } = await step(peripheral.discoverSomeServicesAndCharacteristicsAsync(
+            [bare(serviceUuid)],
+            [bare(CHAR_CONFIG_UUID), bare(CHAR_STATUS_UUID)],
+        ))
+        const configChar = characteristics.find((c) => c.uuid === bare(CHAR_CONFIG_UUID))
+        const statusChar = characteristics.find((c) => c.uuid === bare(CHAR_STATUS_UUID))
+        if (!configChar || !statusChar) {
+            throw new Error('leaf is missing the expected provisioning characteristics')
+        }
+
+        const attMtu = typeof peripheral.mtu === 'number' ? peripheral.mtu : 23
+        const mtu = Math.max(DEFAULT_MTU, attMtu - 3)
+
+        return {
+            id,
+            name,
+            mtu,
+            async write(charUuid, bytes) {
+                if (!active) throw new Error('BLE transport is closed')
+                if (bare(charUuid) !== bare(CHAR_CONFIG_UUID)) {
+                    throw new Error(`unexpected write target ${charUuid}`)
+                }
+                // write-with-response (withoutResponse=false) for ordered, reliable delivery.
+                await configChar.writeAsync(Buffer.from(bytes), false)
+            },
+            async subscribe(charUuid, onValue) {
+                if (!active) throw new Error('BLE transport is closed')
+                if (bare(charUuid) !== bare(CHAR_STATUS_UUID)) {
+                    throw new Error(`unexpected subscribe target ${charUuid}`)
+                }
+                const listener = (data) => onValue(new Uint8Array(data))
+                const off = () => {
+                    subscriptions.delete(off)
+                    statusChar.removeListener('data', listener)
+                    Promise.resolve().then(() => statusChar.unsubscribeAsync()).catch(() => {})
+                }
+                subscriptions.add(off)
+                statusChar.on('data', listener)
+                try { await statusChar.subscribeAsync() } catch (error) {
+                    off()
+                    throw error
+                }
+                if (!active) {
+                    off()
+                    throw new Error('BLE transport is closed')
+                }
+                return off
+            },
+            async close() {
+                release()
+            },
+        }
+    } catch (error) {
+        release()
+        throw error
+    } finally {
+        clearTimeout(timer)
+        controller.abort()
     }
 }

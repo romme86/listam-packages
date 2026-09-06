@@ -9,3 +9,5 @@ export * from './presence'
 export * from './list-move'
 export * from './plan'
 export * from './value'
+
+export const LEAF_EXPERIMENT_ENABLED: boolean

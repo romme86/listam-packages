@@ -59,6 +59,10 @@ import { createOwnerControlClient } from './lib/owner-control-client.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
 import { confirmSnapshot, isCompactionRecord, isNodeCovered, reduceCompactionLog, reduceCompactionOperation } from './lib/compaction.mjs'
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence, rigorAppliesToItem, configAsStamped } from './lib/board-config.mjs'
+import { causalBoardConfig } from './lib/causal-board-config.mjs'
+import { backendActivity } from './lib/backend-activity.mjs'
+import { createSleepCoordinator } from './lib/sleep-coordinator.mjs'
+import { networkLifecycleSnapshot, registerNetworkSwarm } from './lib/network.mjs'
 import { rolloutEnabled } from './lib/rollout.mjs'
 import { isBoardType, validateTicketDraft, normalizeBoardConfig } from './lib/board.mjs'
 import { createViewCheckpoint } from './lib/view-checkpoint.mjs'
@@ -143,6 +147,16 @@ let shutdownStarted = false
 // shared-base-key index used to route a write to the right base when the UI
 // did not tag the payload with an explicit baseKey.
 let baseManager = null
+
+const sleepCoordinator = createSleepCoordinator({
+    activity: backendActivity, suspendNetwork, resumeNetwork,
+    networkSnapshot: networkLifecycleSnapshot,
+    getBases: () => [autobase, ...(baseManager?.list() ?? []).map((ctx) => ctx.autobase)],
+})
+
+export function getNetworkSwarms() {
+    return [swarm, ...(baseManager?.list() ?? []).map((ctx) => ctx.swarm)]
+}
 const _listIdToBaseKey = new Map()
 // Cross-device auto-join: baseKeyHex → propagated READ credentials ({encKey,
 // epochKey}) for shared bases referenced by the personal registry that this
@@ -408,6 +422,13 @@ export async function startBackend(platform) {
 }
 
 async function handleFrontendRequest(req, error) {
+    if ([RPC_NET_SUSPEND, RPC_NET_RESUME, RPC_GET_NET_DIAGNOSTICS].includes(req.command)) {
+        return processFrontendRequest(req, error)
+    }
+    return backendActivity.track(() => processFrontendRequest(req, error))
+}
+
+async function processFrontendRequest(req, error) {
     logger.log('[INFO] Got a request from react', req)
     if (error) {
         logger.log('[ERROR] Got an error from react', error)
@@ -514,19 +535,19 @@ async function handleFrontendRequest(req, error) {
             }
             case RPC_NET_SUSPEND: {
                 logger.log('[INFO] Command RPC_NET_SUSPEND')
-                const suspended = await suspendNetwork()
-                replyJson(req, { ok: true, suspended })
+                const status = await sleepCoordinator.suspend()
+                replyJson(req, { ok: true, ...status })
                 break
             }
             case RPC_NET_RESUME: {
                 logger.log('[INFO] Command RPC_NET_RESUME')
-                const resumed = await resumeNetwork()
+                const resumed = await sleepCoordinator.resume()
                 replyJson(req, { ok: true, resumed })
                 break
             }
             case RPC_GET_NET_DIAGNOSTICS: {
                 logger.log('[INFO] Command RPC_GET_NET_DIAGNOSTICS')
-                replyJson(req, { ok: true, ...joinTransportSnapshot() })
+                replyJson(req, { ok: true, ...joinTransportSnapshot(), sleep: sleepCoordinator.snapshot() })
                 break
             }
             case RPC_GET_LOG_TAIL: {
@@ -810,6 +831,7 @@ async function replyBackupResult(req, run) {
 function ensureOwnerControlClient() {
     if (ownerControlClient) return ownerControlClient
     ownerControlClient = createOwnerControlClient({
+        registerNetwork: registerNetworkSwarm,
         async loadControlSeed() {
             const buffer = getBootSecretBuffer(bootSecretsForControl, 'controlDeviceSeed')
             return buffer ? buffer.toString('hex') : null
@@ -1963,6 +1985,10 @@ async function joinList (invite) {
 }
 
 export async function apply (ctx, nodes, view, host) {
+    return backendActivity.track(() => applyBatch(ctx, nodes, view, host))
+}
+
+async function applyBatch (ctx, nodes, view, host) {
     if (ctx.autobase?.closing) {
         logger.log('[WARNING] Apply called while Autobase is closing; skipping.')
         return
@@ -2005,7 +2031,14 @@ export async function apply (ctx, nodes, view, host) {
         if (!value) continue
 
         if (isMembershipRecord(value)) {
-            const result = reduceMembershipOperation(value, ctx.membershipState, { baseKey: ctx.autobase?.key })
+            // A newly applied record cannot skip its signed predecessor. In
+            // particular, a restored owner cannot make a higher-sequence re-key
+            // win solely by arriving ahead of the next record in the chain.
+            // Replay of already committed views remains backward compatible.
+            const result = reduceMembershipOperation(value, ctx.membershipState, {
+                baseKey: ctx.autobase?.key,
+                requireContiguousSequence: true,
+            })
             ctx.setMembershipState(result.state)
             if (!result.ok) {
                 logger.log('[WARNING] Rejected membership op', { reason: result.reason })
@@ -2182,17 +2215,17 @@ export async function apply (ctx, nodes, view, host) {
                 // on where a concurrent config record lands. No flag on the read
                 // side: it is inert until writers stamp.
                 //
-                // Otherwise fall back to timestamps (rigorNotRetroactive), which
-                // gets the common case right — a ticket written before rigor was
-                // turned on — but cannot tell a writer that had not YET seen the
-                // rigor-on config from one that had.
+                // For unstamped writers, resolve the authenticated causal heads.
+                // The timestamp fallback is only for old synthetic adapters
+                // without Autobase node metadata; runtime nodes carry heads.
                 const stamped = configAsStamped(operation.value, seenBoardConfigRecords, {
                     baseKey: ctx.autobase?.key,
                     ownerAuthorityKey: ctx.membershipState.ownerAuthorityKey,
                 })
-                const effective = stamped ?? ctx.boardConfigState
+                const causal = stamped ? null : await causalBoardConfig(ctx, node, seenBoardConfigRecords)
+                const effective = stamped ?? causal ?? ctx.boardConfigState
                 const gated = effective?.config?.rigorOn
-                    && (stamped
+                    && (stamped || causal
                         ? true
                         : !(rolloutEnabled('rigorNotRetroactive')
                             && !rigorAppliesToItem(operation.value, effective)))

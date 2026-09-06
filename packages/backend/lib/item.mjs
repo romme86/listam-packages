@@ -19,6 +19,7 @@ import { buildMovedItem, isSameSurfaceMove } from './list-move.mjs'
 import { isInternalChannelItem } from './shared-creds.mjs'
 import { isPresenceItem } from '@listam/domain/presence'
 import { isFenced, fenceReason } from './fence.mjs'
+import { backendActivity } from './backend-activity.mjs'
 
 // The outbox is INJECTED, not imported: it needs the platform fs and the live
 // epoch/base state, and importing it here would close another import cycle.
@@ -253,7 +254,8 @@ export function enqueueWrite (fn, ctx) {
         if (!(await waitForFlushableWriter(view))) return refuseStalledMutation('WRITE')
         return fn()
     }
-    const next = prev.then(run, run)
+    const done = backendActivity.begin()
+    const next = prev.then(run, run).finally(done)
     _writeChains.set(key, next)
     return next
 }

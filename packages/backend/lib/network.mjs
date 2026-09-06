@@ -88,6 +88,8 @@ import { startPresenceHeartbeat, pokePresence, resetPresenceAccounting } from ".
 import { logger } from "./logger.mjs"
 import { getBackendFs } from './platform-fs.mjs'
 import { recoverEpochKeyFromMembership } from './epoch-recovery.mjs'
+import { getNetworkSwarms } from '../backend.mjs'
+import { createSwarmLifecycle } from './swarm-lifecycle.mjs'
 
 let _initPromise = null
 let _writableCheckTimer = null
@@ -982,7 +984,7 @@ export async function initAutobase(newBaseKey, options = {}) {
             }
         }
 
-        setSwarm(new Hyperswarm(swarmOptions()))
+        setSwarm(registerNetworkSwarm(new Hyperswarm(swarmOptions())))
         broadcastNetworkStatus()
         swarm.on('error', (err) => {
             logger.log('[ERROR] Replication swarm error:', err)
@@ -1283,7 +1285,7 @@ export async function joinViaInvite(z32InviteStr) {
             //    DO NOT close the candidate in onadd — closing it kills the
             //    underlying Noise connection, which is the only live link to the
             //    host. The temp swarm stays alive so we can replicate over it.
-            _tempSwarm = new Hyperswarm(swarmOptions())
+            _tempSwarm = registerNetworkSwarm(new Hyperswarm(swarmOptions()))
             // Short poll on the guest side too: the candidate reads the DHT
             // reply mailbox before it announces (blind-pairing/index.js:651-668),
             // so at the library default of seven minutes the very first read is
@@ -1857,6 +1859,7 @@ export function joinTransportSnapshot() {
         randomized: dht?.randomized ?? null,
         punches: dht?.stats?.punches ?? null,
         relaying: dht?.stats?.relaying ?? null,
+        socketPool: dht?.stats?.socketPool ? { ...dht.stats.socketPool } : null,
         relayConfigured: getRelayKeys().length,
         tempConnections: _tempSwarm?.connections?.size ?? 0,
         mainConnections: swarm?.connections?.size ?? 0,
@@ -1873,32 +1876,30 @@ export function joinTransportSnapshot() {
 // host that left the app to send an invite code came back with dead sockets and
 // an expired announce, and simply stopped being reachable.
 
+const networkLifecycle = createSwarmLifecycle({
+    getSwarms: () => [...getNetworkSwarms(), _tempSwarm],
+    onError: (error) => logger.log('[ERROR] Swarm lifecycle failed', { error: error?.message ?? String(error) }),
+})
+
+export function registerNetworkSwarm(swarm) {
+    networkLifecycle.register(swarm)
+    return swarm
+}
+
+export function networkLifecycleSnapshot() {
+    return networkLifecycle.snapshot()
+}
+
 export async function suspendNetwork() {
-    if (!swarm || swarm.suspended) return false
-    try {
-        await swarm.suspend()
-        logger.log('[INFO] Swarm suspended')
-        return true
-    } catch (e) {
-        logger.log('[ERROR] Swarm suspend failed', { error: e?.message ?? String(e) })
-        return false
-    }
+    return networkLifecycle.suspend()
 }
 
 export async function resumeNetwork() {
-    if (!swarm || !swarm.suspended) return false
-    try {
-        await swarm.resume()
-        logger.log('[INFO] Swarm resumed', joinTransportSnapshot())
-        // Re-announcing is what makes this device findable again; without a
-        // flush the topic can stay stale for a full refresh interval.
-        try { await discovery?.flushed?.() } catch { /* best effort */ }
-        broadcastNetworkStatus()
-        return true
-    } catch (e) {
-        logger.log('[ERROR] Swarm resume failed', { error: e?.message ?? String(e) })
-        return false
-    }
+    const resumed = await networkLifecycle.resume()
+    // Hyperswarm.resume() already resumes every discovery topic. Waiting for
+    // flushed() here makes unavailable peers block the foreground recovery.
+    broadcastNetworkStatus()
+    return resumed
 }
 
 function normalizeInviteCode(raw) {

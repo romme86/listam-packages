@@ -23,9 +23,9 @@
 // "System changes are only allowed in apply" — and they are its own state, rolled
 // back with the view.
 //
-// What is still RED is the VERDICT itself, which is 2.1 proper and a consensus
-// change: a peer that admits an op an older peer drops forks the mesh, so it
-// needs a rollout plan rather than a commit.
+// The verdict regressions are now blocking tests. These fixes change consensus:
+// release them together across a sharing mesh, since older peers can still
+// reject operations admitted by these rules.
 //
 // So the invariant here is not about state, it is about DECISIONS:
 //
@@ -38,8 +38,8 @@
 // so the reorder is staged rather than raced. Each test states the real-world
 // concurrency that produces its two orders.
 //
-// These tests are RED while the defect stands. That is the point: they are the
-// executable definition of "done" for 2.1.
+// These tests exercise the verdicts, retained projections and real two-writer
+// replication. None is marked TODO.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -128,7 +128,7 @@ async function rebuildFromView (ctx) {
 // One apply pass over `nodes`, against a view truncated back to `forkPoint`.
 // Returns everything a rollback would have to undo: the view entries apply
 // appended, the RPC frames it emitted, and the consensus-layer calls it made.
-async function runPass (ctx, nodes, forkPoint, { writerKey } = {}) {
+async function runPass (ctx, nodes, forkPoint, { writerKey, nodeMetadata = () => ({}) } = {}) {
     const frames = []
     setRpc({
         request: (command) => ({
@@ -150,7 +150,7 @@ async function runPass (ctx, nodes, forkPoint, { writerKey } = {}) {
     // Autobase hands apply `from` (the writer's core), not `writer` — mirror that
     // shape or the writer-dependent branches never run.
     const from = { key: writerKey ?? ctx.autobase.local.key }
-    await apply(ctx, nodes.map((value) => ({ value, from })), view, host)
+    await apply(ctx, nodes.map((value) => ({ value, from, ...nodeMetadata(value) })), view, host)
     setRpc(null)
     return {
         appended: view.entries.slice(forkPoint.length),
@@ -388,20 +388,26 @@ test('WRITE SIDE: addItem stamps the config it has seen, only when the flag is o
 // a discard). This op is hand-built and carries NO stamp, so what stays red here
 // is the un-upgraded writer — real until the whole mesh runs the flipped build,
 // and after that only closable by the causal-past rule.
-test('KNOWN RESIDUAL: an UNSTAMPED ticket written concurrently with the rigor-on config is still order-dependent', { todo: 'the unstamped/un-upgraded writer case; a stamping writer is already closed. Needs the causal-past rule, not another flag' }, async (t) => {
+test('an unstamped ticket concurrent with rigor-on keeps its causal rigor-off rules in either order', async (t) => {
     setRolloutFlag('rigorNotRetroactive', true)
     t.after(() => resetRolloutFlags())
 
-    const { ctx, forkPoint } = await ownedBase(t)
+    const { ctx, other } = await baseWithSecondWriter(t)
     const turnedOnAt = Date.now()
-    forkPoint.push({ op: 'board-config', record: boardConfigNode(ctx, false, 1, turnedOnAt - 1000) })
+    await ctx.autobase.append(boardConfigNode(ctx, false, 1, turnedOnAt - 1000))
+    const forkPoint = await snapshotView(ctx.autobase.view)
+    const seenHead = { key: ctx.autobase.local.key, length: ctx.autobase.local.length }
     const rigorOn = boardConfigNode(ctx, true, 2, turnedOnAt)
     // Written by a peer that had not seen `rigorOn`, but whose clock is past it.
     const ticket = sparseTicket('ticket-concurrent', { timestamp: turnedOnAt + 1000 })
     const addOp = boardAddOp(ctx, ticket)
 
-    const addFirst = await runPass(ctx, [addOp, rigorOn], forkPoint)
-    const configFirst = await runPass(ctx, [rigorOn, addOp], forkPoint)
+    const metadata = { nodeMetadata: (value) => value === addOp
+        ? { from: { key: other.publicKey }, length: 1, heads: [seenHead] }
+        : { length: seenHead.length + 1, heads: [seenHead] } }
+    const addFirst = await runPass(ctx, [addOp, rigorOn], forkPoint, metadata)
+    const configFirst = await runPass(ctx, [rigorOn, addOp], forkPoint, metadata)
+    assert.equal(hasItemEntry(addFirst.appended, ticket.id), true, 'legal legacy work must survive')
     assert.equal(
         hasItemEntry(addFirst.appended, ticket.id),
         hasItemEntry(configFirst.appended, ticket.id),
@@ -658,7 +664,7 @@ test('SETTLED EFFECT: an op written under the new epoch decrypts in the same pas
 // writer key opened from two stores). That precondition is stated here rather
 // than assumed away.
 // ---------------------------------------------------------------------------
-test('DISCARD: an accepted writer removal is refused as a replay when a higher-sequence re-key reorders ahead of it', { todo: 'RED until Release 2.1 makes apply deterministic; the assertion below is the definition of done' }, async (t) => {
+test('a higher-sequence forked re-key cannot reorder ahead of its missing predecessor', async (t) => {
     const { ctx, forkPoint, other } = await baseWithSecondWriter(t)
     const seq = nextMembershipSequence(ctx.membershipState)
 
@@ -680,18 +686,22 @@ test('DISCARD: an accepted writer removal is refused as a replay when a higher-s
         'APPLIED THEN DISCARDED: apply accepted the sequence-' + seq + ' removal in one linearization — ' +
         'calling host.removeWriter — and refused it as a replay in another.',
     )
+    // Batch boundaries must not decide the winner either. Rejecting a gap is
+    // independent of whether its predecessor arrives in this or a later pass.
+    for (const ordered of [[removeLow, removeHigh], [removeHigh, removeLow]]) {
+        let prefix = [...forkPoint]
+        const accepted = []
+        for (const record of ordered) {
+            const pass = await runPass(ctx, [record], prefix)
+            prefix.push(...pass.appended)
+            accepted.push(...membershipSequences(pass.appended))
+        }
+        assert.deepEqual(accepted, [seq])
+    }
 })
 
-// The five tests above are marked `todo`, so node:test reports them without
-// failing the run while the defect stands. That is the only way a known-red
-// regression suite can land without breaking CI — but it also means their
-// PRECONDITION assertions stop being enforced: if the staging rotted, they would
-// go on reporting "todo" and nobody would notice the suite had stopped proving
-// anything.
-//
-// This test is NOT todo. It re-asserts, cheaply, that each staging still puts a
-// real operation in front of apply and that apply still admits it in the first
-// order. If this goes red, the todo tests above are measuring nothing.
+// Keep the scenario preconditions explicit even though every regression above
+// now blocks CI: a passing reorder test must exercise a real accepted operation.
 test('HARNESS INTEGRITY: each staged scenario really is admitted in its first order', async (t) => {
     const rigor = await ownedBase(t)
     rigor.forkPoint.push({ op: 'board-config', record: boardConfigNode(rigor.ctx, false, 1) })
@@ -931,42 +941,20 @@ test('END TO END SETTLED VERDICT: with the flag on, the merged history keeps the
     )
 })
 
-test('END TO END CONVERGENCE: an unstamped row discarded on a real base is retracted', { timeout: 600_000 }, async (t) => {
-    // RETARGETED 2026-07-28, when stampBoardConfigOnWrite flipped on.
-    //
-    // It used to stage a STAMPED add whose wall clock landed after the rigor-on
-    // transition. The stamp closes exactly that case, so the precondition below
-    // started failing with `true !== false` — the row is no longer dropped. That
-    // is the flip working, demonstrated on a real two-writer base.
-    //
-    // The old comment said to retire this test when that happened, "with the todo
-    // test above". But KNOWN RESIDUAL did NOT go green: it hand-builds an
-    // UNSTAMPED op, and the verdict is still order-dependent for those. So the
-    // condition for retiring was never met, and deleting this would have dropped
-    // real-base coverage of the case that is reachable RIGHT NOW — an un-upgraded
-    // peer writing without a stamp while the mesh finishes rolling out. Retire it
-    // once the fork window is closed AND unstamped ops are gone.
+test('END TO END CAUSAL VERDICT: a legacy writer keeps legal work after merging newer rigor rules', { timeout: 600_000 }, async (t) => {
     const { ctxB, announced, frames } = await stageRealDiscard(t, {
         rigorOnBeforeAdd: true,
         stampOnWrite: false,
     })
-
-    // Non-vacuity: this test is only meaningful while the row really is dropped.
     assert.equal(
         (await rebuildFromView(ctxB)).some((i) => i.id === announced.id),
-        false,
-        'PRECONDITION: the merged history must still drop the row — otherwise there is nothing to retract',
+        true,
+        'the real two-writer merge must retain the unstamped ticket under its causal rules',
     )
-
-    const retraction = frames.find(
-        (f) => f.command === RPC_DELETE_FROM_BACKEND && f.payload?.id === announced.id,
-    )
-    assert.ok(retraction,
-        'the frontend must be told to drop the row that a real Autobase reorg discarded')
-    assert.equal(retraction.payload.listId, 'work', 'the retraction must carry the bucket the row was shown in')
-    assert.equal(retraction.payload.listType, 'board')
-    assert.equal(ctxB.announcementLog.has(announced.id), false,
-        'the retracted row must leave the log')
+    const lastForRow = frames.filter((f) => f.payload?.id === announced.id).pop()
+    assert.ok(lastForRow, 'the frontend must receive the row')
+    assert.notEqual(lastForRow.command, RPC_DELETE_FROM_BACKEND)
+    assert.equal(ctxB.announcementLog.has(announced.id), true)
 })
 
 // ---------------------------------------------------------------------------

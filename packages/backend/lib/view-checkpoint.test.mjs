@@ -169,3 +169,32 @@ test('reset discards the checkpoint so the next pass replays from index 0', asyn
     assert.equal(result.resumedFrom, 0)
     assert.equal(result.scanned, 1)
 })
+
+test('a missing local block never waits on an offline peer or authorizes a partial snapshot', async () => {
+    const checkpoint = createViewCheckpoint()
+    const entries = [addEntry('a', 'Milk'), null, addEntry('c', 'Eggs')]
+    const view = {
+        get length() { return entries.length },
+        async get(index, opts) {
+            assert.equal(opts?.wait, false, 'catch-up must not fetch unavailable peer blocks')
+            return entries[index]
+        },
+    }
+    const result = await checkpoint.update(view, { wait: false })
+    assert.equal(result.complete, false)
+    entries[1] = addEntry('b', 'Bread')
+    const repaired = await checkpoint.update(view, { wait: false })
+    assert.equal(repaired.complete, true)
+    assert.equal(repaired.resumedFrom, 0)
+    assert.equal(repaired.items.length, 3)
+})
+
+test('a catch-up scan uses a fixed head even while a writer keeps appending', async () => {
+    const checkpoint = createViewCheckpoint()
+    let length = 1
+    const result = await checkpoint.update({
+        get length() { return length },
+        async get(index) { length++; return addEntry(String(index), 'Milk') },
+    })
+    assert.equal(result.scanned, 1)
+})

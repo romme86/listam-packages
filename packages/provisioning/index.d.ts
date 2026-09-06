@@ -75,4 +75,5 @@ export function provisionLeaf(options: {
     mtu?: number
     onStatus?: (code: number, name: string) => void
     timeoutMs?: number
+    signal?: AbortSignal
 }): Promise<{ ok: true }>

@@ -19,6 +19,7 @@
 // File reads/writes go through the platform fs adapter (getBackendFs), using the
 // SYNC node:fs/bare-fs surface (the adapter has no top‑level promise methods).
 import b4a from 'b4a'
+import { backendActivity } from './backend-activity.mjs'
 import { randomBytes } from 'hypercore-crypto'
 import { getBackendFs } from './platform-fs.mjs'
 import { storagePath } from '../backend.mjs'
@@ -287,7 +288,7 @@ function safeLastScheduledAt(fs, reason) {
 let _scheduleTimers = []
 
 function runScheduledTier(reason) {
-    return createAutoBackup({ reason, rolling: true })
+    return backendActivity.track(() => createAutoBackup({ reason, rolling: true }))
 }
 
 // Start (or restart) the rolling backup timers. Idempotent: clears any existing

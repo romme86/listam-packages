@@ -10,6 +10,7 @@
 // there stays byte-identical; the shared path here reuses the same pure
 // primitives (membership/epoch/invite codecs) on per-base state.
 import Corestore from 'corestore'
+import { backendActivity } from './backend-activity.mjs'
 import Autobase from 'autobase'
 import Hyperswarm from 'hyperswarm'
 import BlindPairing from 'blind-pairing'
@@ -220,7 +221,11 @@ function loadSharedSecrets (ctx) {
 // `storageDir` is the per-base Corestore directory. `store`/`keyPair` let the
 // join flow reuse a Corestore it already opened (to derive the writer) and pin
 // the scoped local writer. `joinSwarm:false` opens without networking (tests).
-export async function openSharedBase (ctx, { baseKey = null, encryptionKey = null, storageDir, store = null, keyPair = null, bootstrap = swarmBootstrap, joinSwarm = true } = {}) {
+export async function openSharedBase (ctx, options = {}) {
+    return backendActivity.track(() => openSharedBaseTracked(ctx, options))
+}
+
+async function openSharedBaseTracked (ctx, { baseKey = null, encryptionKey = null, storageDir, store = null, keyPair = null, bootstrap = swarmBootstrap, joinSwarm = true } = {}) {
     if (!storageDir) throw new Error('openSharedBase requires a storageDir')
 
     // A base's encryption key must survive restarts — a fresh base auto-generates
@@ -269,7 +274,7 @@ export async function openSharedBase (ctx, { baseKey = null, encryptionKey = nul
     await rebuildSharedListFromView(ctx)
 
     if (joinSwarm) {
-        ctx.swarm = new Hyperswarm(relaySwarmOptions(bootstrap))
+        ctx.swarm = registerNetworkSwarm(new Hyperswarm(relaySwarmOptions(bootstrap)))
         ctx.swarm.on('error', (err) => logger.log('[ERROR] Shared-base swarm error:', err))
         ctx.swarm.on('connection', (conn) => {
             conn.on('error', () => {})
@@ -308,6 +313,9 @@ export async function rebuildSharedListFromView (ctx) {
     if (!ctx.autobase?.view || !ctx.viewCheckpoint) return false
     try {
         const { items, allItems, membershipRecords, boardConfigRecords, complete } = await ctx.viewCheckpoint.update(ctx.autobase.view, {
+            // Catch-up uses locally committed blocks. Missing peer blocks leave
+            // the previous projection intact and retry on the next catch-up.
+            wait: false,
             onError: (i, e) => logger.log('[ERROR] shared rebuild entry', i, e?.message ?? e),
         })
         if (!complete) {
@@ -567,7 +575,7 @@ export async function joinSharedBaseViaInvite (createBaseContext, { invite, stor
     const joinEpochEncryptionKeyPair = createEpochEncryptionKeyPair()
     ctx.epochEncryptionKeyPair = joinEpochEncryptionKeyPair
 
-    const tempSwarm = new Hyperswarm(relaySwarmOptions(bootstrap))
+    const tempSwarm = registerNetworkSwarm(new Hyperswarm(relaySwarmOptions(bootstrap)))
     const tempPairing = new BlindPairing(tempSwarm, { poll: PAIRING_POLL_MS })
     _sharedJoinTempSwarms.add(tempSwarm)
 
@@ -713,3 +721,4 @@ export async function authorizeWriterOnSharedBase (ctx, { writerKey, epochPublic
         return false
     }
 }
+import { registerNetworkSwarm } from './network.mjs'

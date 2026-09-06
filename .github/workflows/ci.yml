@@ -20,7 +20,7 @@ jobs:
       # npm workspaces: this links every @listam/* package to its sibling in
       # packages/, which is what the test suite imports.
       - name: Install workspace
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       # Single entry point: CI runs exactly what a developer runs locally.
       # Never reimplement the gate list here — change package.json instead.

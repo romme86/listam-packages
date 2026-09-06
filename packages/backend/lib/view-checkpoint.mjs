@@ -33,13 +33,13 @@ export function createViewCheckpoint() {
         lastEntryJson = null
     }
 
-    async function canResume(view) {
+    async function canResume(view, wait) {
         if (processedLength === 0) return false
         if (!view || view.length < processedLength) return false
 
         let tail = null
         try {
-            tail = await view.get(processedLength - 1)
+            tail = await view.get(processedLength - 1, { wait })
         } catch {
             return false
         }
@@ -50,7 +50,7 @@ export function createViewCheckpoint() {
     // so far. `onError(index, error)` reports unreadable entries; the scan
     // reports a partial result for diagnostics, then resets so a later pass
     // retries the full view instead of checkpointing past a missing entry.
-    async function update(view, { onError } = {}) {
+    async function update(view, { onError, wait = true } = {}) {
         if (!view) {
             return {
                 items: reduction.items(),
@@ -64,16 +64,18 @@ export function createViewCheckpoint() {
             }
         }
 
-        const resumed = await canResume(view)
+        const resumed = await canResume(view, wait)
         if (!resumed) reset()
         const start = processedLength
         let scanned = 0
         let complete = true
 
-        for (let i = start; i < view.length; i++) {
+        const length = view.length
+        for (let i = start; i < length; i++) {
             let entry = null
             try {
-                entry = await view.get(i)
+                entry = await view.get(i, { wait })
+                if (entry == null) throw new Error('View block is not available locally')
             } catch (error) {
                 complete = false
                 onError?.(i, error)

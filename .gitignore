@@ -3,4 +3,3 @@ node_modules/
 *.log
 # Never commit registry auth — used only for publishing.
 .npmrc
-package-lock.json

@@ -313,6 +313,7 @@ export function reduceMembershipOperation(record, state = createMembershipState(
         if (!current.ownerAuthorityKey) return rejected('missing-owner', current)
         if (body.ownerAuthorityKey !== current.ownerAuthorityKey) return rejected('wrong-owner', current)
         if (body.sequence <= current.highestSequence) return rejected('replay', current)
+        if (options.requireContiguousSequence && body.sequence !== current.highestSequence + 1) return rejected('sequence-gap', current)
         if (current.removedWriters.has(body.writerKey)) return rejected('removed-writer', current)
 
         const next = cloneMembershipState(current)
@@ -329,6 +330,7 @@ export function reduceMembershipOperation(record, state = createMembershipState(
         if (!current.ownerAuthorityKey) return rejected('missing-owner', current)
         if (body.ownerAuthorityKey !== current.ownerAuthorityKey) return rejected('wrong-owner', current)
         if (body.sequence <= current.highestSequence) return rejected('replay', current)
+        if (options.requireContiguousSequence && body.sequence !== current.highestSequence + 1) return rejected('sequence-gap', current)
         if (!current.writers.has(body.writerKey)) return rejected('unknown-writer', current)
         if (body.writerKey === current.ownerWriterKey) return rejected('cannot-remove-owner', current)
         if (current.writers.size <= 1) return rejected('last-writer', current)
@@ -370,6 +372,7 @@ export function reduceMembershipOperation(record, state = createMembershipState(
         if (!current.ownerAuthorityKey) return rejected('missing-owner', current)
         if (body.ownerAuthorityKey !== current.ownerAuthorityKey) return rejected('wrong-owner', current)
         if (body.sequence <= current.highestSequence) return rejected('replay', current)
+        if (options.requireContiguousSequence && body.sequence !== current.highestSequence + 1) return rejected('sequence-gap', current)
         if (body.writerKey !== current.ownerWriterKey) return rejected('not-owner-writer', current)
         if (body.epoch !== current.currentEpoch) return rejected('wrong-epoch', current)
         if (!body.epochKeyHash) return rejected('missing-epoch-key-hash', current)

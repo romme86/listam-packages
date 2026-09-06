@@ -259,48 +259,57 @@ export function reassemble(frames) {
 //
 // Resolves { ok: true } when the leaf reports STATUS.OK (it then reboots into
 // the provisioned path), rejects on any error status or timeout.
-export async function provisionLeaf({ transport, payload, mtu, onStatus, timeoutMs = 30000 } = {}) {
+export async function provisionLeaf({ transport, payload, mtu, onStatus, timeoutMs = 30000, signal } = {}) {
     if (!transport || typeof transport.write !== 'function' || typeof transport.subscribe !== 'function') {
         throw new Error('transport must provide write() and subscribe()')
     }
     const bytes = encodePayload(payload)
     const frames = chunkPayload(bytes, mtu ?? transport.mtu ?? DEFAULT_MTU)
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('timeoutMs must be positive')
+    if (signal?.aborted) throw new Error('provisioning cancelled')
 
     let settle
     const done = new Promise((resolve, reject) => {
         settle = { resolve, reject }
     })
 
-    let timer = null
     let unsubscribe = null
-    const cleanup = async () => {
-        if (timer) clearTimeout(timer)
-        if (typeof unsubscribe === 'function') {
-            try {
-                await unsubscribe()
-            } catch {
-                // best-effort; the link may already be gone after a successful reboot
-            }
-        }
+    let stopped = false
+    // Cleanup must not extend the deadline when the native BLE stack is wedged.
+    const release = (fn) => {
+        if (typeof fn === 'function') Promise.resolve().then(fn).catch(() => {})
     }
-
+    const fail = (error) => { stopped = true; settle.reject(error) }
+    const onAbort = () => fail(new Error('provisioning cancelled'))
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const timer = setTimeout(() => fail(new Error('provisioning timed out')), timeoutMs)
     const handleStatus = (value) => {
+        if (stopped) return
         const code = value && value.length ? value[0] : value
         onStatus?.(code, statusName(code))
-        if (code === STATUS.OK) settle.resolve({ ok: true })
-        else if (isErrorStatus(code)) settle.reject(new Error(`leaf reported ${statusName(code)}`))
+        if (code === STATUS.OK) { stopped = true; settle.resolve({ ok: true }) }
+        else if (isErrorStatus(code)) fail(new Error(`leaf reported ${statusName(code)}`))
     }
 
-    unsubscribe = await transport.subscribe(CHAR_STATUS_UUID, handleStatus)
-    timer = setTimeout(() => settle.reject(new Error('provisioning timed out')), timeoutMs)
-
     try {
-        for (const frame of frames) {
-            await transport.write(CHAR_CONFIG_UUID, frame)
-        }
-        const result = await done
-        return result
+        // Install the rejection handler before subscribe/write can emit a status.
+        // A late native completion after timeout must never send another frame.
+        const sending = Promise.resolve().then(async () => {
+            if (stopped) return
+            const off = await transport.subscribe(CHAR_STATUS_UUID, handleStatus)
+            if (stopped) { release(off); return }
+            unsubscribe = off
+            for (const frame of frames) {
+                if (stopped) return
+                await transport.write(CHAR_CONFIG_UUID, frame)
+            }
+            return done
+        })
+        return await Promise.race([done, sending])
     } finally {
-        await cleanup()
+        stopped = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        release(unsubscribe)
     }
 }
