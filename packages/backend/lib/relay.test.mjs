@@ -99,6 +99,14 @@ test('createRelayThrough spreads across configured relays', () => {
     assert.equal(picked.size, 2, 'a single relay must not be a single point of failure')
 })
 
+test('a retry visits the alternate relay without affecting direct connections', () => {
+    const select = createRelayThrough([KEY_A, KEY_B])
+    const first = select(true, {})
+    assert.equal(select(false, {}), null)
+    assert.notDeepEqual(select(true, {}), first)
+    assert.deepEqual(select(true, {}), first)
+})
+
 test('relaySwarmOptions carries bootstrap and relay independently', () => {
     setRelayKeys(null)
     assert.deepEqual(relaySwarmOptions(null), {})

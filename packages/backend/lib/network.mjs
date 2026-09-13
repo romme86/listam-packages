@@ -13,7 +13,7 @@ import { createAutoBackup } from "./auto-backup.mjs"
 import { performMemberRemovalRekey } from "./rekey.mjs"
 import { epochResyncRecordMatchesMembership, performEpochResync } from './epoch-resync.mjs'
 import { createEpochGrantChannel } from './epoch-grant-channel.mjs'
-import { createJoinProgressDeadline } from './join-progress.mjs'
+import { createJoinWatch } from './join-watch.mjs'
 import { performCompaction } from './compaction-writer.mjs'
 import { createCompactionState, seedCompactionBarrier } from './compaction.mjs'
 import { compactionReadiness, reducePresence } from '@listam/domain/presence'
@@ -92,7 +92,6 @@ import { getNetworkSwarms } from '../backend.mjs'
 import { createSwarmLifecycle } from './swarm-lifecycle.mjs'
 
 let _initPromise = null
-let _writableCheckTimer = null
 // Every code the owner has handed out that is still alive. One slot used to
 // mean minting a code for the second friend silently killed the first.
 const inviteBook = createInviteBook()
@@ -224,16 +223,11 @@ function endJoinWatch() {
         try { _joinDetach() } catch (_) {}
         _joinDetach = null
     }
-    if (_writableCheckTimer) {
-        clearTimeout(_writableCheckTimer)
-        _writableCheckTimer = null
-    }
 }
 
-function waitForWritable() {
+export function waitForWritable({ startedAt } = {}) {
     endJoinWatch()
     const gen = ++_joinGeneration
-    const progress = createJoinProgressDeadline({ timeoutMs: JOIN_NO_PROGRESS_TIMEOUT_MS })
     // The view length is an exact, O(1) answer to "has anything new linearized?",
     // so the expensive rebuild+push only runs when there is genuinely more to
     // show — not on every wake-up.
@@ -241,26 +235,31 @@ function waitForWritable() {
     let busy = false
     let phase = 'writable'
 
-    const current = () => gen === _joinGeneration && isPendingJoinSuccess
+    const base = autobase
+    const mainSwarm = swarm
+    const current = () => gen === _joinGeneration && isPendingJoinSuccess && autobase === base
 
-    function finish(kind, message) {
+    function finish(kind, message, reason = JOIN_REASON.TIMEOUT) {
         if (!current()) return
         endJoinWatch()
+        _joinAbort = null
         setIsPendingJoinSuccess(false)
-        broadcastMessage(kind === 'error' ? { type: 'join-error', reason: JOIN_REASON.TIMEOUT, message } : { type: 'join-success' })
+        broadcastMessage(kind === 'error' ? { type: 'join-error', reason, message } : { type: 'join-success' })
         broadcastNetworkStatus()
         cleanupTempSwarm()
     }
 
     async function syncWhatHasArrived() {
-        const viewLength = autobase?.view?.length ?? 0
+        const viewLength = base?.view?.length ?? 0
         if (viewLength === pushedAtViewLength) return
         pushedAtViewLength = viewLength
         try {
             const list = await rebuildListFromPersistedOps()
+            if (!current()) return
             setCurrentList(list)
             if (list.length > 0) syncListToFrontend(list)
-            projectItemsToFrontend(await rebuildExtraListItems())
+            const extraItems = await rebuildExtraListItems()
+            if (current()) projectItemsToFrontend(extraItems)
         } catch (e) {
             logger.log('[WARNING] join watch: partial sync failed:', e?.message ?? e)
         }
@@ -271,27 +270,32 @@ function waitForWritable() {
         busy = true
         try {
             try {
-                if (autobase) await autobase.update()
+                if (base) await base.update()
             } catch (e) {
                 logger.log('[ERROR] join watch: autobase.update failed:', e?.message ?? e)
             }
             if (!current()) return
+            await syncWhatHasArrived()
+        } finally {
+            busy = false
+        }
+    }
 
+    const watch = createJoinWatch({
+        base,
+        swarm: mainSwarm,
+        isCurrent: current,
+        timeoutMs: JOIN_NO_PROGRESS_TIMEOUT_MS,
+        pollMs: JOIN_FALLBACK_POLL_MS,
+        heartbeatMs: JOIN_HEARTBEAT_MS,
+        startedAt,
+        onCheck(progress) {
             // Drop the temp swarm as soon as the main one is up, so the host does
             // not count this guest twice.
             if (_tempSwarm && swarm?.connections?.size > 0) {
                 logger.log('[INFO] Main swarm connected, cleaning up temp swarm')
                 cleanupTempSwarm()
             }
-
-            // Replaying a long history is progress even though nothing is
-            // writable yet: the view grows steadily while apply() works through
-            // it. Refresh the deadline so the watch waits out a slow catch-up
-            // and only gives up on a guest that has genuinely stopped moving.
-            progress.observeViewLength(autobase?.view?.length ?? 0)
-
-            await syncWhatHasArrived()
-            if (!current()) return
 
             if (phase === 'writable' && autobase?.writable) {
                 if (autobase.key) saveAutobaseKey(autobase.key)
@@ -324,61 +328,48 @@ function waitForWritable() {
                 finish('success')
                 return
             }
-
-            if (progress.expired()) {
-                if (phase === 'syncing') {
-                    // Writable but no peer yet: the join DID work, so report
-                    // success rather than an error the user cannot act on.
-                    logger.log('[INFO] Syncing phase timed out, but guest is writable — reporting success')
-                    finish('success')
-                } else {
-                    // Pairing already succeeded, so the host DID hand over the
-                    // credentials and its write grant is on the base. What
-                    // stalled is this device applying it, so do not word this as
-                    // the host withholding permission — that sends the user to
-                    // audit a desktop that did nothing wrong.
-                    const stalledAtZero = (autobase?.view?.length ?? 0) === 0
-                    logger.log('[ERROR] Join stalled with no forward progress.', {
-                        view: autobase?.view?.length ?? null,
-                        mainSwarm: swarm?.connections?.size ?? null,
-                        tempSwarm: _tempSwarm?.connections?.size ?? 0,
-                    })
-                    finish('error', stalledAtZero
-                        ? 'Paired, but no project data has arrived yet. Check the connection and try again.'
-                        : 'Paired, but syncing this project stalled before write access took effect. It may finish in the background — reopen the app shortly.')
-                }
+            // Kick one update/projection at a time. The watch samples progress,
+            // writability and its deadline even while these reads are pending.
+            void evaluate()
+        },
+        onTimeout() {
+            if (phase === 'syncing') {
+                // Writable but no peer yet: the join DID work, so report
+                // success rather than an error the user cannot act on.
+                logger.log('[INFO] Syncing phase timed out, but guest is writable — reporting success')
+                finish('success')
+            } else {
+                // Pairing already succeeded, so the host DID hand over the
+                // credentials and its write grant is on the base. What
+                // stalled is this device applying it, so do not word this as
+                // the host withholding permission — that sends the user to
+                // audit a desktop that did nothing wrong.
+                const stalledAtZero = (autobase?.view?.length ?? 0) === 0
+                logger.log('[ERROR] Join stalled with no forward progress.', {
+                    view: autobase?.view?.length ?? null,
+                    mainSwarm: swarm?.connections?.size ?? null,
+                    tempSwarm: _tempSwarm?.connections?.size ?? 0,
+                })
+                finish('error', stalledAtZero
+                    ? 'Paired, but no project data has arrived yet. Check the connection and try again.'
+                    : 'Paired, but syncing this project stalled before write access took effect. It may finish in the background — reopen the app shortly.')
             }
-        } finally {
-            busy = false
-        }
-    }
-
-    const onSignal = () => { void evaluate() }
-    const base = autobase
-    const mainSwarm = swarm
-    try { base?.on('update', onSignal) } catch (_) {}
-    try { mainSwarm?.on('connection', onSignal) } catch (_) {}
-
-    function tick() {
-        if (!current()) return
-        void evaluate()
-        if (current()) _writableCheckTimer = setTimeout(tick, JOIN_FALLBACK_POLL_MS)
-    }
-    _writableCheckTimer = setTimeout(tick, JOIN_FALLBACK_POLL_MS)
-
+        },
+        onHeartbeat(elapsedMs) {
+            const snapshot = { phase: phase === 'writable' ? 'permission' : phase, elapsedMs, viewLength: base?.view?.length ?? 0, ...joinTransportSnapshot() }
+            logger.log('[INFO] Join waiting for project sync', snapshot)
+            broadcastMessage({ type: 'join-progress', ...snapshot })
+        },
+    })
+    const cancel = () => finish('error', 'Join cancelled', JOIN_REASON.CANCELLED)
+    _joinAbort = cancel
     _joinDetach = () => {
-        try {
-            if (typeof base?.off === 'function') base.off('update', onSignal)
-            else base?.removeListener?.('update', onSignal)
-        } catch (_) {}
-        try {
-            if (typeof mainSwarm?.off === 'function') mainSwarm.off('connection', onSignal)
-            else mainSwarm?.removeListener?.('connection', onSignal)
-        } catch (_) {}
+        watch.stop()
+        if (_joinAbort === cancel) _joinAbort = null
     }
 
     // Evaluate once immediately: the guest may already be writable.
-    void evaluate()
+    watch.check()
 }
 
 export function createInvite({ fresh = false } = {}) {
@@ -1243,6 +1234,7 @@ export async function joinViaInvite(z32InviteStr) {
     }
 
     _joinPromise = (async () => {
+        const startedAt = Date.now()
         const rollbackSnapshot = createJoinRollbackSnapshot({
             currentList,
             baseKey,
@@ -1302,7 +1294,6 @@ export async function joinViaInvite(z32InviteStr) {
             })
 
             const result = await new Promise((resolve, reject) => {
-                const startedAt = Date.now()
                 let settled = false
 
                 const finish = (fn, arg) => {
@@ -1467,7 +1458,7 @@ export async function joinViaInvite(z32InviteStr) {
             } else {
                 logger.log('[INFO] Guest not yet writable — starting waitForWritable polling')
                 setIsPendingJoinSuccess(true)
-                waitForWritable()
+                waitForWritable({ startedAt })
             }
         } catch (e) {
             // Diagnostics ride as a separate argument, never hung off the

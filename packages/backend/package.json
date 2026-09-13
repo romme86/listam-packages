@@ -1,6 +1,6 @@
 {
   "name": "@listam/backend",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -24,21 +24,22 @@
     "@listam/owner-control": "^0.14.0",
     "@listam/protocol": "^0.9.0",
     "@listam/secrets": "^0.8.0",
-    "autobase": "^7.20.0",
+    "autobase": "^7.28.2",
     "b4a": "^1.7.1",
     "bare-fs": "^4.4.4",
     "bare-path": "^3.0.1",
     "bare-rpc": "^0.2.12",
     "bare-url": "^2.4.3",
     "blind-pairing": "^2.3.1",
-    "corestore": "^7.5.0",
+    "corestore": "^7.12.5",
     "compact-encoding": "^3.0.0",
     "hypercore-crypto": "^3.6.1",
     "hyperdht": "^6.34.0",
-    "hyperswarm": "^4.12.1",
+    "hyperswarm": "^4.17.1",
     "protomux": "^3.11.0",
     "sodium-universal": "^5.0.1",
-    "z32": "^1.1.0"
+    "z32": "^1.1.0",
+    "hypercore": "^11.36.1"
   },
   "publishConfig": {
     "access": "public"

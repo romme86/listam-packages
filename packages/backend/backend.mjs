@@ -56,6 +56,7 @@ import { parseBootSecretPayload, getBootSecretBuffer, persistBackendSecret } fro
 import { exportDataBackup, exportSeedBackup, importBackup } from './lib/backup.mjs'
 import { listAutoBackups, restoreAutoBackup, setBackupPassword, isBackupPasswordSet, startScheduledBackups, stopScheduledBackups, scheduleState, setScheduleEnabled } from './lib/auto-backup.mjs'
 import { createOwnerControlClient } from './lib/owner-control-client.mjs'
+import { createBlindMirrorPublisher } from './lib/blind-mirror-publisher.mjs'
 import { isMembershipRecord, reduceMembershipLog, reduceMembershipOperation, canCreateMembershipInvite } from './lib/membership.mjs'
 import { confirmSnapshot, isCompactionRecord, isNodeCovered, reduceCompactionLog, reduceCompactionOperation } from './lib/compaction.mjs'
 import { isBoardConfigRecord, reduceBoardConfigLog, reduceBoardConfigOperation, createBoardConfigRecord, nextBoardConfigSequence, rigorAppliesToItem, configAsStamped } from './lib/board-config.mjs'
@@ -129,6 +130,7 @@ export let swarmBootstrap = null
 // Lazily-created owner-control client (Phase 14/15): the worklet's hyperdht
 // client for pairing with and commanding the user's headless instances.
 let ownerControlClient = null
+let blindMirrorPublisher = null
 let bootSecretsForControl = null
 
 let localWriterKeyFilePath = './local-writer-key.txt'
@@ -418,7 +420,14 @@ export async function startBackend(platform) {
     outbox.replay().catch((e) => logger.log('[ERROR] outbox: boot replay failed:', e?.message ?? e))
 
     const disposeTeardown = platform.onTeardown?.(shutdownBackend)
-    return { paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown }
+    if (platformFs.existsSync(`${storagePath}-blind-mirrors.json`)) {
+        try { ensureBlindMirrorPublisher() } catch (error) { logger.log('[ERROR] Cannot restore blind mirror subscriptions:', error?.message) }
+    }
+    return {
+        paths, rpc: rpcGenerated, shutdown: shutdownBackend, disposeTeardown,
+        pairControl: (code, name) => ensureOwnerControlClient().pair(code, name),
+        commandControl: commandOwnerControl,
+    }
 }
 
 async function handleFrontendRequest(req, error) {
@@ -642,7 +651,7 @@ async function processFrontendRequest(req, error) {
             case RPC_CONTROL_COMMAND: {
                 logger.log('[INFO] Command RPC_CONTROL_COMMAND')
                 const data = parseRpcJson(req.data)
-                const result = await ensureOwnerControlClient().command(data?.serverPublicKeyHex, data?.command, data?.payload)
+                const result = await commandOwnerControl(data?.serverPublicKeyHex, data?.command, data?.payload)
                 notifyFrontend({ type: 'owner-control-result', command: data?.command, serverPublicKeyHex: data?.serverPublicKeyHex, result })
                 break
             }
@@ -831,6 +840,7 @@ async function replyBackupResult(req, run) {
 function ensureOwnerControlClient() {
     if (ownerControlClient) return ownerControlClient
     ownerControlClient = createOwnerControlClient({
+        bootstrap: swarmBootstrap,
         registerNetwork: registerNetworkSwarm,
         async loadControlSeed() {
             const buffer = getBootSecretBuffer(bootSecretsForControl, 'controlDeviceSeed')
@@ -842,6 +852,26 @@ function ensureOwnerControlClient() {
         logger,
     })
     return ownerControlClient
+}
+
+function ensureBlindMirrorPublisher() {
+    if (blindMirrorPublisher) return blindMirrorPublisher
+    blindMirrorPublisher = createBlindMirrorPublisher({
+        fs: platformFs, path: `${storagePath}-blind-mirrors.json`,
+        getContext: (key) => [primaryContext, ...(baseManager?.list() ?? [])]
+            .find((ctx) => ctx.autobase?.key?.toString('hex') === key),
+        send: (server, command, payload) => ensureOwnerControlClient().command(server, command, payload),
+        isSuspended: () => shutdownStarted || networkLifecycleSnapshot().desiredSuspended,
+        onError: (error) => logger.log('[WARNING] Blind mirror update deferred:', error?.message),
+    })
+    return blindMirrorPublisher
+}
+
+async function commandOwnerControl(server, command, payload) {
+    if (command === 'topics' && ['mirror', 'stop-mirror'].includes(payload?.action)) {
+        return ensureBlindMirrorPublisher().configure(server, payload.baseKey, payload.action === 'mirror')
+    }
+    return ensureOwnerControlClient().command(server, command, payload)
 }
 
 async function reconcileLegacyKeyFiles({
@@ -889,6 +919,8 @@ async function fencedTeardown() {
 export async function shutdownBackend() {
     if (shutdownStarted) return
     shutdownStarted = true
+    blindMirrorPublisher?.stop()
+    blindMirrorPublisher = null
 
     logger.log('[INFO] Backend shutting down...')
 

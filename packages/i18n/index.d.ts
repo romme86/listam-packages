@@ -29,6 +29,11 @@ export type MessageValues = Record<string, MessageValue>
 export type MessageEntry = string | PluralMessage
 
 export type MessageKey =
+    | 'donation.button'
+    | 'donation.yearly'
+    | 'donation.support'
+    | 'donation.thanks'
+    | 'donation.unavailable'
     | 'app.locale.system'
     | 'app.locale.english'
     | 'app.locale.spanish'
@@ -494,6 +499,12 @@ export type MessageKey =
     | 'mobile.notes.untitled'
     | 'mobile.notes.insertBlock'
     | 'mobile.notes.insertTitle'
+    | 'mobile.notes.doubleTapText'
+    | 'mobile.notes.writeText'
+    | 'mobile.notes.editElement'
+    | 'mobile.notes.elementActions'
+    | 'mobile.notes.moveUp'
+    | 'mobile.notes.moveDown'
     | 'desktop.status.live'
     | 'desktop.status.local'
     | 'desktop.status.peers'

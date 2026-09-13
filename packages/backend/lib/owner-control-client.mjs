@@ -17,6 +17,7 @@ import {
     parsePairingCode,
 } from '@listam/owner-control'
 import { secretStoreKey } from '@listam/secrets'
+import { createRelayThrough, getRelayKeys } from './relay.mjs'
 
 const REQUEST_TIMEOUT_MS = 30_000
 
@@ -24,11 +25,14 @@ const REQUEST_TIMEOUT_MS = 30_000
 // { createDht, loadControlSeed, saveControlSeed, logger }. createDht lets a
 // test bind the client to a private testnet; production uses the default.
 export function createOwnerControlClient(deps) {
-    const dht = typeof deps.createDht === 'function' ? deps.createDht() : new DHT()
+    const dht = typeof deps.createDht === 'function' ? deps.createDht() : new DHT(deps.bootstrap ? { bootstrap: deps.bootstrap } : {})
     deps.registerNetwork?.(dht)
     const timeoutMs = deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
     let deviceKeyPair = null
     let servers = []
+    let sequence = Date.now()
+    const commandQueues = new Map()
+    const selectRelay = createRelayThrough(getRelayKeys())
 
     async function ensureDeviceKeyPair() {
         if (deviceKeyPair) return deviceKeyPair
@@ -48,18 +52,20 @@ export function createOwnerControlClient(deps) {
 
     async function withSession(serverPublicKeyHex, run) {
         const keyPair = await ensureDeviceKeyPair()
-        const socket = dht.connect(b4a.from(serverPublicKeyHex, 'hex'))
+        deps.logger?.log?.('[INFO] Owner-control connecting', { server: serverPublicKeyHex.slice(0, 8), bootstrapNodes: deps.bootstrap?.length ?? 0 })
+        const socket = dht.connect(b4a.from(serverPublicKeyHex, 'hex'), { relayThrough: selectRelay?.(true, {}) ?? null })
         socket.on('error', () => {})
         try {
             await new Promise((resolve, reject) => {
                 const cleanup = () => { clearTimeout(timer); socket.removeListener('open', opened); socket.removeListener('close', closed) }
-                const opened = () => { cleanup(); resolve() }
+                const opened = () => { cleanup(); deps.logger?.log?.('[INFO] Owner-control connected'); resolve() }
                 const closed = () => { cleanup(); reject(new Error('control connection closed')) }
                 const timer = setTimeout(() => { cleanup(); reject(new Error('control connection timed out')) }, timeoutMs)
                 socket.once('open', opened)
                 socket.once('close', closed)
             })
-            const session = createOwnerControlSession({ keyPair, write: (line) => socket.write(line + '\n') })
+            sequence = Math.max(Date.now(), sequence + 1)
+            const session = createOwnerControlSession({ keyPair, seqStart: sequence, write: (line) => socket.write(line + '\n') })
             let buffered = ''
             socket.on('data', (chunk) => {
                 buffered += b4a.toString(chunk)
@@ -113,7 +119,13 @@ export function createOwnerControlClient(deps) {
         },
         async command(serverPublicKeyHex, command, payload) {
             if (!/^[0-9a-f]{64}$/.test(serverPublicKeyHex ?? '')) return { ok: false, reason: 'unknown-server' }
-            return withSession(serverPublicKeyHex, (session) => session.request(command, payload))
+            // Signed per-device sequence numbers must reach one helper in order.
+            const previous = commandQueues.get(serverPublicKeyHex) ?? Promise.resolve()
+            const result = previous.catch(() => {}).then(() => withSession(serverPublicKeyHex, (session) => session.request(command, payload)))
+            commandQueues.set(serverPublicKeyHex, result)
+            try { return await result } finally {
+                if (commandQueues.get(serverPublicKeyHex) === result) commandQueues.delete(serverPublicKeyHex)
+            }
         },
         async close() {
             try {

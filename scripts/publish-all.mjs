@@ -26,9 +26,9 @@ function pkgMeta(dir) {
     return JSON.parse(readFileSync(join(ROOT, 'packages', dir, 'package.json'), 'utf8'))
 }
 
-function publishedVersion(name) {
+function publishedVersion(name, version) {
     try {
-        return execFileSync('npm', ['view', `${name}`, 'version'], { encoding: 'utf8', env: NPM_ENV }).trim()
+        return execFileSync('npm', ['view', `${name}@${version}`, 'version'], { encoding: 'utf8', env: NPM_ENV }).trim()
     } catch {
         return null
     }
@@ -36,7 +36,7 @@ function publishedVersion(name) {
 
 for (const dir of ORDER) {
     const meta = pkgMeta(dir)
-    const onRegistry = publishedVersion(meta.name)
+    const onRegistry = publishedVersion(meta.name, meta.version)
     if (onRegistry === meta.version) {
         console.log(`= ${meta.name}@${meta.version} already published, skipping`)
         continue

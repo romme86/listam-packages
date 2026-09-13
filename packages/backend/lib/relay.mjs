@@ -33,13 +33,17 @@ import b4a from 'b4a'
 // Relays operated for Listam. A relay only ever sees encrypted UDX frames it
 // cannot read — blind-relay pairs two streams by a preexchanged token and
 // forwards bytes — so this is a reachability aid, not a trust boundary. It is
-// still a liveness dependency, which is why the list is plural: `selectRelay`
-// picks one at random per connection (hyperdht/lib/connect.js:876).
+// still a liveness dependency, which is why the list is plural: start at a
+// random candidate, then alternate candidates when relaying is requested.
 export const DEFAULT_RELAY_KEYS = [
     // Geekom (cassandrina-app), deployed 2026-08-27. Derived from a seed
     // persisted at ~/listam-relay, so it survives restarts and reinstalls —
     // rotating it would strand every client already shipping this constant.
     '8kn1epgsuok4zbkq3odaz7xf67yrs81bt7g1ztnr5fdq6aahfj1o',
+    // Raspberry Pi, deployed 2026-09-06 with its own persistent relay seed.
+    // Connection relaying verified across the public DHT. This is not a
+    // bootstrap address: its upstream routers do not forward inbound UDP.
+    'mw1ihwc7a66jnxu5c443peu4iadgema95nq7t4wqrk5pzc8aohwy',
 ]
 
 const RELAY_KEY_BYTES = 32
@@ -133,6 +137,10 @@ export function createRelayThrough(keys, { onEngage = null } = {}) {
     // device cannot punch directly. Logged once per swarm instead of per
     // connection, which would be unreadable on a busy peer.
     let engaged = false
+    // Randomize the first choice, then visit each candidate before reusing it.
+    // Hyperswarm owns retry timing; a failed attempt must not randomly choose
+    // the same unavailable relay again while another candidate is available.
+    let next = Math.floor(Math.random() * keys.length)
 
     return (force, swarmRef) => {
         const randomized = swarmRef?.dht?.randomized === true
@@ -146,9 +154,9 @@ export function createRelayThrough(keys, { onEngage = null } = {}) {
             }
         }
 
-        return keys.length === 1
-            ? keys[0]
-            : keys[Math.floor(Math.random() * keys.length)]
+        const selected = keys[next]
+        next = (next + 1) % keys.length
+        return selected
     }
 }
 
